@@ -1,0 +1,23 @@
+NEXUS — Third-Party License Notices
+====================================
+
+This project depends on third-party components with the following obligations:
+
+1. psycopg2-binary (LGPL-3.0 with static-linking exception)
+   Used as a PostgreSQL client library via its prebuilt wheel (which bundles
+   libpq). Dynamic linking / unmodified wheel usage carries no copyleft
+   obligation for this project. Source: https://github.com/psycopg/psycopg2
+
+2. opencv-python-headless (Apache-2.0; wheels may bundle FFmpeg/LGPL parts)
+   We depend on the headless wheel and use it unmodified via its public API.
+   If you redistribute a bundled environment, review the FFmpeg components
+   inside the wheel. Source: https://github.com/opencv/opencv-python
+   (Note: opencv is only required by the optional macOS OCRX component.)
+
+3. fswatch (GPL-3.0)
+   Invoked as an external subprocess CLI (optional file-watch accelerator);
+   never linked or embedded. GPL does not propagate across the subprocess
+   boundary. Source: https://github.com/emcrisostomo/fswatch
+
+Model weights (not distributed with this repo, downloaded at install time):
+- BAAI/bge-m3 and BAAI/bge-reranker-v2-m3 (MIT, https://huggingface.co/BAAI)

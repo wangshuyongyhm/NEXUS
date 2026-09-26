@@ -1,0 +1,11 @@
+# sync-manifest.yaml — 主仓→公开仓白名单（sync-strategy.md 三道闸之①）
+# 规则：显式枚举文件，不用目录通配——新增文件默认不同步。
+# 执行：MAIN_REPO=<主仓路径> tools/sync-scrub.py --manifest（先过内容闸再拷贝）。
+# 1558 已泄露集合（keys.json / MEM 快照 / task 密钥文件）永久黑名单，永不在此列。
+
+version: 1
+# 当前骨架期为设计占位——真源迁移启动时逐项填入：
+# - src: 05-System/自动化脚本/pypi/nexus-mem/src/nexus_mem/shared.py
+#   dst: packages/nexus-mem/src/nexus_mem/shared.py
+#   rename: null
+entries: []
