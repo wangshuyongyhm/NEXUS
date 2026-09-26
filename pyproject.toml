@@ -23,7 +23,7 @@ dependencies = []
 nexus = "nexus_oss.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/nexus-oss/nexus-oss"
+Homepage = "https://github.com/wangshuyongyhm/NEXUS"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus_oss"]

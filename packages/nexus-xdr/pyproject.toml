@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nexus-oss/nexus-oss"
+Homepage = "https://github.com/wangshuyongyhm/NEXUS"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nexus_xdr"]
