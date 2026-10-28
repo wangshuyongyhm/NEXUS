@@ -1,104 +1,159 @@
-# NEXUS
+# NEXUS — An Orchestration OS for Your Own AI Agents
 
-**A multi-agent orchestration framework for AI CLIs** — NEXUS's primary job is scheduling and coordinating other agents: dispatching tasks across a fleet of coding agents (Kimi CLI, OpenCode, DeepSeek, …), verifying their work through callbacks, and keeping their shared knowledge honest. Everything else (memory bus, gates, embeddings, console) exists to serve that orchestration loop.
+[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
 
-> 中文简介见文末（[中文说明](#中文说明)）。
+> **Bring your own AI agent** (Claude Code, Codex, Kimi (app / CLI), ZCode, Cursor, …) **and your own Obsidian vault — and get a production-grade multi-agent orchestration system**: task dispatch with a single source of truth, a shared knowledge base with hybrid retrieval, declarative quality gates, cross-agent presence awareness, and a self-verifying memory loop.
 
-## Status
-
-🚧 **Pre-release skeleton** (v0.1.0). This repository currently contains the package skeleton, install script draft, and architecture documentation. The full source is being migrated from the author's private monorepo after a security scrub (see `docs/sync-strategy.md`).
-
-## Core capabilities
-
-NEXUS 调度其它 Agent 的协作编排，落在四件核心能力上（**roadmap**——能力定义与运行经验来自作者的多 Agent 生产体系，完整源码正从私有主仓脱敏迁移，当前仓库的可用组件是 setup 向导与 Provider 注册表；以下描述的是目标形态而非已交付实现）：
-
-1. **Dispatch 全链调度** — 把任务派给最合适的 Agent：任务书契约（目标/边界/凭据）、目标路由、回调感知（小弟 done 主控必知）。载体：XDR 消息总线（`nexus-xdr`, :19998）——dispatch / callback / task-state / presence 注册。
-2. **回调验收闭环** — 完成不是「Agent 说完成了」：done 回调过 gate（产出存在性/报告质量/经验回流逐项机器验收），验收通过才算交付。载体：GateKit（`nexus-gatekit`）——声明式 YAML 检查（REJECT/WARN）。
-3. **认知诚实（经验可验证可纠正）** — Agent 干完活必须回流经验；经验被套用后必须回填真实结果（success/failed），多主验证裁定权重——经验不是越老越值钱，是被验证越多越值钱。载体：MEM 共享知识库（`nexus-mem`, :11537）——FTS+向量混合检索（BGE-M3 中英双语）+ apply-outcome 追踪。
-4. **多主控联邦** — N 个主控并存（各自的 supervisor），op-log 声明式冲突检测 + 共享真相源（MEM/task-state）+ 用户最高仲裁；并行是目标，冲突上浮不多数决。
-
-配套（服务于编排循环）：**Embed**（:11436，文件监视→BGE-M3→pgvector）、**Console**（:19900，只读可观测台）。
-
-> macOS-only extras (OCRX screen-control, TCC-gated checks) are intentionally layered outside the core distribution.
-
-## Quickstart (draft)
-
-Requirements: macOS 13+ (Linux roadmap: see below), Python ≥3.10,<3.12, PostgreSQL 15 + pgvector, pgbouncer.
-
-```bash
-# 1. Install (creates ~/.nexus/venv — never touches your ambient python)
-./install.sh
-
-# 2. heavy ML deps (torch/BGE, ~5GB) only if you need embeddings:
-~/.nexus/venv/bin/pip install -e "packages/nexus-mem[full]"
-
-# 3. Connect your providers (see "Provider onboarding" below):
-#    local web wizard at http://127.0.0.1:<random-port>/ — add/remove
-#    platforms freely, fill keys, get live red/green connectivity tests;
-#    keys land in ~/.nexus/.env (chmod 600), NEVER in the repo
-~/.nexus/venv/bin/nexus setup
-
-# 4. Check what the scheduler can see (dispatch-ready providers):
-~/.nexus/venv/bin/nexus providers
-
-# 5. Initialize the database (schema + migrations are in db/):
-#    createdb nexus_mem && psql -d nexus_mem -f db/schema.sql
-#    for f in db/migrations/00*.sql; do psql -d nexus_mem -f "$f"; done
-
-# 6. Start services — launchd plist generation is PLANNED (not yet built;
-#    templates/launchd/ will ship with the source migration). Linux systemd
-#    user units: TODO (see install.sh header)
-```
-
-The installer stops with a clear message at the "missing real configuration"
-step (vault root, PG DSN, model dir) — that is expected for the skeleton.
-
-## Provider onboarding（接入配置）
-
-Key 配置是**接入层**，不是产品本体——NEXUS 编排调度 Agent，各家 LLM/Bot 平台只是被调度的算力与通知通道。
-
-- **平台可自定义增删**：`~/.nexus/providers.json`（`NEXUS_AGENT_PROVIDERS`）是单一真源——内置智谱/Kimi/DeepSeek/OpenRouter/Telegram/飞书六平台出厂预置，可删、可改、可添加任意自定义平台（四要素：id / env 变量名 / 帮助链接 / 探活方式）
-- **向导**：`nexus setup` 页内即可增删平台；自定义平台支持通用 HTTP 探活（`{VAR}` 占位替换 + 预期状态码），填错即时红绿反馈
-- **密钥卫生**：真值只写 `~/.nexus/.env`（仓库目录之外，mode 600）；仓库内只有空值模板 `.env.example`
-- **调度可见性**：新平台配好 key 后，调度层经同一注册表可见（`nexus providers` / `configured_providers()`，契约见 `docs/agent-providers.md`）
-
-## Environment variables
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `NEXUS_HOME` | runtime home (venv, config.toml, .env) | `~/.nexus` |
-| `NEXUS_ENV_FILE` | .env target path for `nexus setup` | `$NEXUS_HOME/.env` |
-| `NEXUS_AGENT_PROVIDERS` | provider registry JSON path | `$NEXUS_HOME/providers.json` (wizard; `~/.nexus/providers.json` for `nexus providers`) |
-| `NEXUS_PYTHON` | interpreter override for install.sh | auto-detect (python3.11 → python3.10 → python3) |
-| `NEXUS_PG_DSN` | PostgreSQL DSN (via pgbouncer) | `postgresql://localhost:6432/nexus_mem` |
-| `NEXUS_MODEL_DIR` | BGE model cache dir | `~/.cache/huggingface/hub` |
-
-## Linux
-
-Core services (MEM/XDR/GateKit/Embed/Console) are portable in principle; the
-launchd → systemd-user translation layer is a designed-but-not-built TODO
-(`install.sh` marks the seams). OCRX is macOS-only by design (Vision framework
-+ CGEvent) and is not part of the core distribution.
-
-## License
-
-MIT (see `LICENSE`). Third-party obligations in `NOTICE` (psycopg2 LGPL,
-opencv/FFmpeg, fswatch GPL-via-subprocess). Model weights are downloaded at
-install time and are MIT-licensed (BAAI).
+NEXUS does not replace your AI coding tools. It gives them an operating system.
 
 ---
 
-## 中文说明
+## Why NEXUS
 
-NEXUS 是一套**多 Agent 协作编排调度框架**：主要职责是调度其它 Agent——把任务
-派发给一组 AI CLI（Kimi/OpenCode/DeepSeek…）、用回调验收它们的交付、让它们的
-共享经验可验证可纠正、并支持多主控联邦并行。四件核心能力（dispatch 全链调度/
-回调验收闭环/认知诚实/多主控联邦）之下，记忆库（MEM）、消息总线（XDR）、门禁
-引擎（GateKit）、嵌入服务（Embed）与可观测台（Console）都是编排循环的载体。
+If you use AI coding agents daily, you have probably hit these walls:
 
-平台 key 的配置只是接入层：`nexus setup` 向导支持自由增删平台（内置六家 +
-任意自定义），真值永不出本机。当前为**开源骨架预览版**（v0.1.0）：包结构、
-安装脚本草稿与架构文档已就位，完整源码正在从私有主仓脱敏迁移（策略见
-`docs/sync-strategy.md`）。
+- **Context is scarce.** A single agent session forgets everything after compaction. Hard-won debugging insights evaporate between sessions.
+- **Experience doesn't compound.** Agent A solved this exact problem last week. Agent B has no way to know, so you pay the tokens again.
+- **No quality enforcement.** "Rules written in a markdown file" rely on the model's goodwill. Nothing *hard-blocks* a sloppy handoff.
+- **Each agent, its own siloed brain.** Parallel agents stepping on each other's files, with no way to even notice the collision.
 
-快速上手见上方 Quickstart——照走到「缺真实配置」提示为止即符合预期。
+NEXUS answers each of these with infrastructure, not prompt conventions:
+
+| Pain | NEXUS answer |
+|---|---|
+| Context scarcity | A constraint-injection protocol: a ~1 KB routing layer every turn, topic documents loaded on demand |
+| Experience evaporation | MEM knowledge base: FTS + vector dual retrieval, write-through from every agent |
+| Rule drift | Declarative gates: YAML scenarios, REJECT/WARN severity, 46 check plugins, enforced by machines |
+| Agent collisions | PRESENCE: registration, heartbeats, and an op-log that intercepts same-file concurrent edits within a 30 s window |
+| Experience rot | An epistemic honesty loop: every applied experience is traced, its outcome written back, its weight recalibrated |
+
+## How it compares
+
+| Dimension | LangGraph Supervisor | OpenAI Swarm | AutoGen GroupChat | **NEXUS** |
+|---|---|---|---|---|
+| Number of centers | 1 (single-point bottleneck) | 0 (no source of truth) | N (manager = hidden single center) | **N orchestrators in a federation** |
+| Coordination | Central LLM routes tasks | Agent-to-agent handoff | Rotating manager | **op-log declarations + directed broadcasts** |
+| Shared source of truth | Shared state | None | Shared chat history | **MEM knowledge base + task_state table** |
+| Conflict detection | None | None | None | **Declarative interception (`conflict=true`)** |
+| Memory verification | None | None | None | **Outcome write-back + calibration weights** |
+
+The existing frameworks orchestrate *roles inside one process*. NEXUS orchestrates *real, heterogeneous CLI/desktop/IDE agents* — the tools you already pay for and already know.
+
+## Quickstart (≈15 minutes)
+
+The smoke path below was black-box verified end to end: from a clean checkout to the skeleton's boundaries in about 15 minutes.
+
+**Prerequisites**
+
+- macOS (Apple Silicon or Intel) — see *Honest boundaries* below
+- Python 3.11+
+- PostgreSQL with the `pgvector` extension
+- An Obsidian vault (any existing one works)
+- At least one supported AI agent CLI/desktop app — bring your own
+
+**Steps**
+
+```bash
+# 1. Clone
+git clone <repo-url> nexus-oss && cd nexus-oss
+
+# 2. Install — dependency detection → config generation → service registration
+./install.sh
+
+# 3. Review the generated config (NEXUS_HOME/config.toml):
+#    - point NEXUS at your Obsidian vault
+#    - confirm the service ports (defaults match a standard local setup —
+#      edit config.toml if your PostgreSQL listens elsewhere)
+
+# 4. Smoke-test to the skeleton's boundaries: services up, health
+#    endpoints answering, the bus ready for its first dispatch.
+```
+
+That's the skeleton boundary today. Agent onboarding — the setup wizard and MCP/skill connection for your own agent — is the current productization focus; see *Roadmap* below.
+
+## Architecture
+
+Five cooperating services plus a Markdown-native constraint layer:
+
+```
+        ┌──────────────────────────────────────────────────┐
+        │            Your AI agents — any mix              │
+        │   Claude Code · Codex · Kimi · Cursor · ZCode    │
+        └──────────┬───────────────┬──────────────┬────────┘
+                   │  MCP / HTTP   │              │
+        ┌──────────▼───────────────▼──────────────▼────────┐
+        │   XDR — the dispatch bus              (:19998)   │
+        │   dispatch · callback · task_state · presence    │
+        └───┬──────────────┬───────────────┬──────────┬────┘
+    ┌───────▼─────┐ ┌──────▼──────┐ ┌──────▼─────┐ ┌─▼────────┐
+    │ MEM         │ │ EMBED       │ │ OCRX       │ │CONSTRAINT│
+    │ knowledge   │ │ embeddings  │ │ vision/UI  │ │ rules    │
+    │  (:11537)   │ │  (:11436)   │ │  (:11438)  │ │ (vault)  │
+    └─────────────┘ └─────────────┘ └────────────┘ └──────────┘
+              PostgreSQL + pgvector underneath
+```
+
+- **XDR (dispatch bus)** — task dispatch / callback / status query over one channel; `task_state` is the single source of truth so multi-agent state never drifts. A patrol loop watches executor health and rescues stalled tasks.
+- **MEM (knowledge base)** — BGE-M3 embeddings in PostgreSQL/pgvector, FTS + vector dual retrieval, file-watch incremental indexing. Read and write are one path: what one agent learns, every agent can find.
+- **EMBED** — the embedding service underneath MEM.
+- **OCRX (vision)** — screenshot / OCR / template matching / UI automation, giving the orchestration layer eyes when a task needs them.
+- **CONSTRAINT (rules layer)** — a layered routing protocol living in the vault: a small always-on routing layer plus on-demand topic documents, so discipline costs minimal context.
+
+### Federation, not a center
+
+Multiple orchestrator agents can coexist. Before editing a file, an agent declares its intent to the op-log; a second declaration on the same target inside the 30-second window is intercepted (`conflict=true`), and content fingerprints (hash + mtime + size) catch "declared, but the file changed underneath" cases. The human user remains the highest arbiter.
+
+## Three features you won't find elsewhere
+
+### 1. Declarative quality gates
+
+Rules are data, not prose. Each scenario (init / dispatch / persist / code / state transitions) is a YAML file with a 46-plugin check pool; findings are graded **REJECT** (hard block) or **WARN** (soft warning). A `done` callback automatically triggers hard validation — missing artifacts bounce the task back. Discipline is enforced by machines, not by model goodwill.
+
+### 2. The epistemic honesty loop
+
+Every time an agent retrieves an experience and applies it, the application is traced (annotate). When the task completes, the outcome (`success` / `failed`) is written back, and a background service recalibrates each experience's `calibration_weight`. Knowledge that keeps failing accumulates visible debt and gets re-inspected, hardened, or retired. The memory doesn't just grow — it **verifies itself**. This loop ships as a first-class feature: applied experiences are traced, outcomes written back, weights recalibrated.
+
+### 3. Five-layer artifact persistence
+
+Reasoning bought with tokens cannot be regenerated. Every dispatched task persists five layers: `input/` (the task spec), `process/` (the full execution log), `output/report.md` (conclusions), `output/files/` (data artifacts), `output/negative-results.md` (rejected approaches *with reasons*), plus a `reproduce.sh`. The next agent — or the next you — never re-pays for the same discovery.
+
+## How a task flows
+
+1. **Dispatch** — an orchestrator agent writes a task spec and posts it to the bus; the bus issues a credential (HMAC-SHA256 signed, TTL-bound, task-bound) and delivers the spec to the target agent's session.
+2. **Execute** — the executor reads the spec, searches MEM with its credential, and works. Presence heartbeats and a 30-second patrol keep the orchestrator honest about liveness.
+3. **Callback** — `done` / `progress` / `need_decision` land in `task_state`, and the done gate hard-validates the required artifacts before the task may close.
+4. **Persist** — five layers of artifacts hit the vault; high-value findings are written back to MEM, where the honesty loop will keep score on whether they actually help next time.
+
+## Battle-tested, honestly labeled
+
+NEXUS is not a demo. In daily production use it has:
+
+- **12 heterogeneous AI agents** onboarded through a standardized registry (CLI, desktop app, and IDE modes)
+- **1,600+ tasks** tracked end to end through the dispatch bus
+- **66,000+ knowledge entries** indexed and served in real time
+
+Hardened through a **16-task engineering pipeline** (447 pytest tests passing; clean-venv import verified 10/10 across all three packages).
+
+## Roadmap
+
+- **Productization (current focus):** the setup wizard and one-click agent onboarding (MCP/skill connection), a starter vault template, polished docs — in progress; the repo you are reading is part of that push.
+- **Cross-platform:** Linux and Windows support (service supervision and file-watching are currently macOS-native).
+
+### Honest boundaries
+
+- **macOS-first today.** Service supervision (`launchd`) and file-system events (`FSEvents`) are macOS-specific; cross-platform is on the roadmap, not in the box.
+- **Bring your own agents.** Agent drivers are *not* bundled — NEXUS orchestrates the AI tools you already have; it ships none itself.
+- **Obsidian is the vault substrate today.** The Markdown-native constraint layer lives in the vault; a starter vault template is on the roadmap.
+- **First release versioning is TBD.** The public repo starts as a source release; tagged releases will follow.
+
+## License
+
+**Issues and PRs welcome** — open an issue or pull request on this repository.
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+*Chinese version: [README.zh-CN.md](README.zh-CN.md)*
