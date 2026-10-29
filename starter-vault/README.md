@@ -28,7 +28,7 @@ The philosophy in one line: *a rule that no machine enforces is a wish.*
 
    ```bash
    # via pipx (recommended):
-   pipx install nexusos-gate nexusos-xdr
+   pipx install "git+https://github.com/wangshuyongyhm/nexusos-xdr.git" "git+https://github.com/wangshuyongyhm/nexusos-gate.git"  # or from PyPI once published
    # or a local checkout:
    pip install -e /path/to/pypi/nexusos-gate
    ```

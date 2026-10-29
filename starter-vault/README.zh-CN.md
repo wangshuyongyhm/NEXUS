@@ -27,7 +27,7 @@
 
    ```bash
    # pipx（推荐）：
-   pipx install nexusos-gate nexusos-xdr
+   pipx install "git+https://github.com/wangshuyongyhm/nexusos-xdr.git" "git+https://github.com/wangshuyongyhm/nexusos-gate.git"  # PyPI 发布后可改 pipx install 包名
    # 或本地路径安装：
    pip install -e /path/to/pypi/nexusos-gate
    ```

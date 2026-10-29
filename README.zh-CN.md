@@ -147,7 +147,7 @@ curl -X POST http://127.0.0.1:11537/apply_outcome \
 
 ```bash
 # 1. 克隆
-git clone <repo-url> nexus-oss && cd nexus-oss
+git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 
 # 2. 安装——依赖探测 → 配置生成 → 服务注册
 ./install.sh

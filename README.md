@@ -147,7 +147,7 @@ The smoke path below was black-box verified end to end: from a clean checkout to
 
 ```bash
 # 1. Clone
-git clone <repo-url> nexus-oss && cd nexus-oss
+git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 
 # 2. Install — dependency detection → config generation → service registration
 ./install.sh
