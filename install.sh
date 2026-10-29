@@ -52,7 +52,7 @@ command -v pgbouncer >/dev/null && ok "pgbouncer" || warn "pgbouncer missing (br
 command -v fswatch >/dev/null && ok "fswatch (optional accelerator)" || warn "fswatch missing (optional; embed falls back to polling)"
 
 # ── 2. python packages ───────────────────────────────────────────────────
-say "→ [2/6] packages (editable, skeleton phase uses --no-deps for speed)"
+say "→ [2/6] packages (editable; deps resolved normally — 1976 O4)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 专用 venv——绝不用 ambient python3（1575 实战坑：装进 pyenv 全局会影子覆盖
 # 已注册的同名 editable 包，生产服务静默换芯）
@@ -60,10 +60,12 @@ VENV="$NEXUS_HOME/venv"
 [ -x "$VENV/bin/python3" ] || { "$PYFOUND" -m venv "$VENV"; ok "venv created: ${VENV}（解释器 ${PYFOUND}）"; }
 PYB="$VENV/bin/python3"
 "$PYB" -m pip install -e "$SCRIPT_DIR" --no-deps -q && ok "nexus-oss (meta)"
-for p in nexus-gatekit nexus-mem nexus-xdr; do
-  "$PYB" -m pip install -e "$SCRIPT_DIR/packages/$p" --no-deps -q && ok "$p"
+# 1976：nexusos-* 1.0.0 lockstep 四包（deps 正常解析=fastmcp/psycopg2 等全装，
+# 1974 O4 "--no-deps 半残"的正规解）；common 先装（gate/mem/xdr 依赖它）
+for p in nexusos-common nexusos-gate nexusos-mem nexusos-xdr; do
+  "$PYB" -m pip install -e "$SCRIPT_DIR/packages/$p" -q && ok "$p"
 done
-say "  (full deps: $VENV/bin/pip install -e 'packages/nexus-mem[full]' — downloads torch+BGE, ~5GB)"
+say "  (full extras: $VENV/bin/pip install -e 'packages/nexusos-mem[full]' — downloads torch+BGE, ~5GB)"
 
 # ── 3. model weights (optional, embed service only) ──────────────────────
 say "→ [3/6] BGE-M3 model weights (~4.3GB, optional)"

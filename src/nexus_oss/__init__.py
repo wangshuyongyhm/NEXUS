@@ -1,11 +1,12 @@
 """NEXUS meta package (skeleton).
 
-The real components live in packages/:
-- nexus-gatekit  — gate engine (renamed from private 'nexus-gate'; the PyPI
+The real components live in packages/ (nexusos-* lockstep 1.0.0):
+- nexusos-common — shared anchors + `nexus` CLI (init/doctor)
+- nexusos-gate   — gate engine
   name was taken by an unrelated project)
-- nexus-mem      — shared knowledge base (MEM)
-- nexus-xdr      — agent message bus (XDR)
+- nexusos-mem    — shared knowledge base (MEM)
+- nexusos-xdr    — agent message bus (XDR)
 """
 
 __version__ = "0.1.0"
-COMPONENTS = ("nexus-gatekit", "nexus-mem", "nexus-xdr")
+COMPONENTS = ("nexusos-common", "nexusos-gate", "nexusos-mem", "nexusos-xdr")
