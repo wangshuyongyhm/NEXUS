@@ -14,7 +14,7 @@
 ### 1. 安装 NEXUS
 
 ```bash
-git clone <repo-url> nexus-oss && cd nexus-oss
+git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 ./install.sh && nexus init     # 向导扫描环境 → 固定选项协商 → 打印 MCP 片段
 ```
 
