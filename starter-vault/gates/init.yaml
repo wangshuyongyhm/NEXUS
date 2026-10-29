@@ -1,0 +1,47 @@
+# init scenario gate (generic) — session start gate
+# Runs when an agent session starts. Purpose: fail fast on a broken environment
+# instead of discovering it mid-task. All paths parameterized via context/env.
+version: 1
+scenario: init
+description: Session start checks (config present, dispatch bus reachable, identity known — other services self-check)
+required_context:
+  - {name: agent, desc: "agent name registering", required: true}
+  - {name: role, desc: "orchestrator | executor", required: true}
+  - {name: session_id, desc: "unique session id", required: true}
+items:
+  # I1: config present — $NEXUS_HOME/config.toml must exist (wizard output)
+  - id: I1
+    name: config file present
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test -f "${NEXUS_HOME:-$HOME/.nexus}/config.toml"
+
+  # I2: dispatch bus reachable — the one service nothing works without
+  - id: I2
+    name: dispatch bus reachable
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: curl -sf -o /dev/null --max-time 3 "${NEXUS_XDR_URL:-http://127.0.0.1:19998}/health"
+
+  # I3: knowledge base reachable (WARN — degraded mode without it is legal)
+  - id: I3
+    name: knowledge base reachable
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: curl -sf -o /dev/null --max-time 3 "${NEXUS_MEM_URL:-http://127.0.0.1:11537}/health"
+
+  # I4: identity sanity — agent name and role non-empty in context
+  - id: I4
+    name: identity fields present
+    auto: true
+    severity: REJECT
+    check:
+      type: field_check
+      jsonpath: agent
+      min_len: 1

@@ -1,0 +1,59 @@
+# dispatch 场景门禁（通用版·中文注释）— 派单前门禁
+# 主控派单前运行。目的：不无书派单、不盲派冲突单。
+# 执行者侧规则（凭据校验）在协议层，不在此——本门禁管派发方。
+version: 1
+scenario: dispatch
+description: 派单前检查（任务书在位、目标声明、摘要够实）
+required_context:
+  - {name: task_path, desc: "任务书文件绝对路径", required: true}
+  - {name: target_agent, desc: "执行者名", required: true}
+  - {name: summary, desc: "一行任务摘要", required: true}
+items:
+  # D1：任务书文件在盘上存在
+  - id: D1
+    name: task spec file exists
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test -f "{task_path}"
+
+  # D2：目标执行者已指名（非空）
+  - id: D2
+    name: target agent named
+    auto: true
+    severity: REJECT
+    check:
+      type: field_check
+      jsonpath: target_agent
+      min_len: 1
+
+  # D3：摘要载有实质内容（≥10 字符——"fix it" 不叫任务书）
+  - id: D3
+    name: summary substantive
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: summary
+      min_len: 10
+
+  # D3b：超时已声明——巡检环需要界限判断沉默
+  - id: D3b
+    name: timeout declared
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: timeout
+      min_len: 1
+
+  # D4：调度总线活性——确认发送前总线有应答
+  # （op-log 冲突拦截在派发时由总线侧执行）
+  - id: D4
+    name: dispatch bus reachable (sanity)
+    auto: false
+    severity: WARN
+    check:
+      type: command
+      cmd: curl -sf --max-time 3 "${NEXUS_XDR_URL:-http://127.0.0.1:19998}/session/active" -o /dev/null

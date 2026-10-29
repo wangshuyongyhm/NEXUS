@@ -1,0 +1,47 @@
+# init 场景门禁（通用版·中文注释）— 会话启动门禁
+# 会话启动时运行。目的：环境坏了快速失败，而不是干到一半才发现。
+# 所有路径经 context/env 参数化。
+version: 1
+scenario: init
+description: 会话启动检查（配置在位、调度总线可达、身份明确——其余服务自查）
+required_context:
+  - {name: agent, desc: "注册的 agent 名", required: true}
+  - {name: role, desc: "orchestrator | executor", required: true}
+  - {name: session_id, desc: "唯一会话 id", required: true}
+items:
+  # I1：配置在位——$NEXUS_HOME/config.toml 必须存在（向导产物）
+  - id: I1
+    name: config file present
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test -f "${NEXUS_HOME:-$HOME/.nexus}/config.toml"
+
+  # I2：调度总线可达——没有它一切不转的那个服务
+  - id: I2
+    name: dispatch bus reachable
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: curl -sf -o /dev/null --max-time 3 "${NEXUS_XDR_URL:-http://127.0.0.1:19998}/health"
+
+  # I3：知识库可达（WARN——没有它降级运行合法）
+  - id: I3
+    name: knowledge base reachable
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: curl -sf -o /dev/null --max-time 3 "${NEXUS_MEM_URL:-http://127.0.0.1:11537}/health"
+
+  # I4：身份健全——context 中 agent 名与角色非空
+  - id: I4
+    name: identity fields present
+    auto: true
+    severity: REJECT
+    check:
+      type: field_check
+      jsonpath: agent
+      min_len: 1

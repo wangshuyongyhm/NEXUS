@@ -1,0 +1,49 @@
+# persist 场景门禁（通用版·中文注释）— 关单门禁
+# 任务标记 done 前运行。目的：没落盘的工作不许关单。
+# 五层资产契约见 protocols.md §落盘。
+version: 1
+scenario: persist
+description: 关单检查（产出在位、报告够实、声明经验证）
+required_context:
+  - {name: task_dir, desc: "任务目录（内含 input/process/output）", required: true}
+  - {name: files, desc: "回调中声明的产出文件路径列表", required: true}
+  - {name: summary, desc: "关单摘要", required: true}
+items:
+  # P1：报告存在且实质（≥30 行证据，不是空壳）
+  - id: P1
+    name: report exists and substantive
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test "$(wc -l < "{task_dir}/output/report.md" 2>/dev/null || echo 0)" -ge 30
+
+  # P2：否定结果已记录（带原因的已排除方案）
+  - id: P2
+    name: negative results present
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: test -s "{task_dir}/output/negative-results.md"
+
+  # P3：每个声明的文件路径必须在盘上存在（幽灵路径拦截——
+  # 「核验，绝不虚报」的机械化落地）
+  - id: P3
+    name: produced files exist on disk
+    auto: true
+    severity: REJECT
+    check:
+      type: files_exist
+      jsonpath: files
+      min_len: 1
+
+  # P4：摘要实质（下一个人类先读它）
+  - id: P4
+    name: closing summary substantive
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: summary
+      min_len: 10

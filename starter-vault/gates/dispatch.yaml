@@ -1,0 +1,60 @@
+# dispatch scenario gate (generic) — pre-dispatch gate
+# Runs before an orchestrator sends a task. Purpose: no spec-less or
+# conflict-blind dispatch. Executor-side rules (credential check) live in
+# the protocol, not here — this gate guards the sender.
+version: 1
+scenario: dispatch
+description: Pre-dispatch checks (spec exists, target declared, summary long enough)
+required_context:
+  - {name: task_path, desc: "absolute path to the task spec file", required: true}
+  - {name: target_agent, desc: "executor name", required: true}
+  - {name: summary, desc: "one-line task summary", required: true}
+items:
+  # D1: the task spec file exists on disk
+  - id: D1
+    name: task spec file exists
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test -f "{task_path}"
+
+  # D2: target agent named (non-empty)
+  - id: D2
+    name: target agent named
+    auto: true
+    severity: REJECT
+    check:
+      type: field_check
+      jsonpath: target_agent
+      min_len: 1
+
+  # D3: summary carries real content (>= 10 chars — "fix it" is not a spec)
+  - id: D3
+    name: summary substantive
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: summary
+      min_len: 10
+
+  # D3b: timeout declared — the patrol loop needs a bound to judge silence
+  - id: D3b
+    name: timeout declared
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: timeout
+      min_len: 1
+
+  # D4: dispatch bus sanity — confirms the bus answers before the send
+  # (op-log conflict interception happens bus-side at dispatch time)
+  - id: D4
+    name: dispatch bus reachable (sanity)
+    auto: false
+    severity: WARN
+    check:
+      type: command
+      cmd: curl -sf --max-time 3 "${NEXUS_XDR_URL:-http://127.0.0.1:19998}/session/active" -o /dev/null

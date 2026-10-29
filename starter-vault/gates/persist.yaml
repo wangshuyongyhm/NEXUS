@@ -1,0 +1,49 @@
+# persist scenario gate (generic) — task-close gate
+# Runs before a task is marked done. Purpose: unpersisted work cannot close.
+# The five-layer artifact contract lives in protocols.md §persist.
+version: 1
+scenario: persist
+description: Task-close checks (artifacts exist, report substantive, file claims verified)
+required_context:
+  - {name: task_dir, desc: "task directory (input/process/output inside)", required: true}
+  - {name: files, desc: "list of produced file paths claimed in the callback", required: true}
+  - {name: summary, desc: "closing summary", required: true}
+items:
+  # P1: report exists and is substantive (>= 30 lines of evidence, not a stub)
+  - id: P1
+    name: report exists and substantive
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: test "$(wc -l < "{task_dir}/output/report.md" 2>/dev/null || echo 0)" -ge 30
+
+  # P2: negative results recorded (rejected approaches with reasons)
+  - id: P2
+    name: negative results present
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: test -s "{task_dir}/output/negative-results.md"
+
+  # P3: every claimed file path must exist on disk (ghost paths bounce —
+  # "verify, never claim" made mechanical)
+  - id: P3
+    name: produced files exist on disk
+    auto: true
+    severity: REJECT
+    check:
+      type: files_exist
+      jsonpath: files
+      min_len: 1
+
+  # P4: summary substantive (the next human reads this first)
+  - id: P4
+    name: closing summary substantive
+    auto: true
+    severity: WARN
+    check:
+      type: field_check
+      jsonpath: summary
+      min_len: 10
