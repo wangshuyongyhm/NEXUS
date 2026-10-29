@@ -1,5 +1,8 @@
 # NEXUS —— 给你自己的 AI Agent 装一套编排操作系统
 
+[English](./README.md) | **简体中文**
+
+
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)

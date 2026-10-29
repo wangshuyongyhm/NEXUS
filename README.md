@@ -1,5 +1,8 @@
 # NEXUS — An Orchestration OS for Your Own AI Agents
 
+**English** | [简体中文](./README.zh-CN.md)
+
+
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
