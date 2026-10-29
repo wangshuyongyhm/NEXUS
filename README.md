@@ -139,6 +139,7 @@ The smoke path below was black-box verified end to end: from a clean checkout to
 
 - macOS (Apple Silicon or Intel) — see *Honest boundaries* below
 - Python 3.11+
+- [pipx](https://pipx.pypa.io/) (recommended — installs the `nexus` CLI in an isolated environment)
 - PostgreSQL with the `pgvector` extension (the installer can provision this for you — see the FAQ)
 - An Obsidian vault (any existing one works — and a Markdown directory is enough, see the FAQ)
 - At least one supported AI agent CLI/desktop app — bring your own
@@ -152,13 +153,20 @@ git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 # 2. Install — dependency detection → config generation → service registration
 ./install.sh
 
-# 3. Guided onboarding (shipping with v1.0.0): the setup wizard scans your
+# 3. Apply the database schema (one manual step today — the wizard provisions
+#    the database but does not yet apply db/schema.sql; this step will move
+#    into the wizard in a coming release)
+createdb nexus_mem 2>/dev/null; psql -d nexus_mem -c 'CREATE EXTENSION IF NOT EXISTS vector'
+psql -d nexus_mem -f db/schema.sql
+ls db/migrations/*.sql | sort | xargs -I{} psql -d nexus_mem -f {}
+
+# 4. Guided onboarding (shipping with v1.0.0): the setup wizard scans your
 #    environment, negotiates anything missing with fixed choices (never open
 #    questions), detects your installed agents, and prints ready-to-paste
 #    MCP config snippets for each of them
 nexus init
 
-# 4. Smoke-test to the skeleton's boundaries: services up, health
+# 5. Smoke-test to the skeleton's boundaries: services up, health
 #    endpoints answering, the bus ready for its first dispatch.
 ```
 
@@ -197,6 +205,8 @@ Five cooperating services plus a Markdown-native constraint layer:
 | CONSOLE | 19900 | Observability console: service health and monitoring aggregation |
 | CONSTRAINT | — (vault) | Layered routing protocol in Markdown: ~1 KB always-on routing + on-demand topic documents |
 
+> **Ports are defaults.** The table shows default ports; the setup wizard shifts any occupied port automatically, and the effective values always live in `$NEXUS_HOME/.env` — when in doubt, trust `.env`, not this table.
+
 - **XDR (dispatch bus)** — task dispatch / callback / status query over one channel; `task_state` is the single source of truth so multi-agent state never drifts. A patrol loop watches executor health and rescues stalled tasks.
 - **MEM (knowledge base)** — BGE-M3 embeddings in PostgreSQL/pgvector, FTS + vector dual retrieval, file-watch incremental indexing. Read and write are one path.
 - **EMBED** — the embedding service underneath MEM.
@@ -227,11 +237,13 @@ NEXUS meets your agent where it lives: an MCP endpoint on the dispatch bus, plus
 | Kimi (CLI / desktop) | `~/.kimi-code/` or desktop app dir | `~/.config/kimi/AGENTS.md` / workspace AGENTS.md | HTTP | JSON |
 | Cursor | `~/.cursor/` | `.cursor/rules/` + AGENTS.md + hooks.json | streamable-http | JSON |
 
-- **Claude Code** — supported: MCP server entry plus settings hooks for lifecycle events.
-- **Codex** — supported: TOML config with inline auth header.*
-- **ZCode** — supported: JSON config with automatic migration from legacy header keys.*
-- **Kimi (CLI / desktop)** — supported: project-level MCP config; desktop needs the managed source file, not the derived one.
-- **Cursor** — supported: MCP config plus three lifecycle hooks (session start / stop / before submit) for broadcast integration.
+Grading legend: **config-verified** = verified on a live installation; **beta** = documentation-level. The MCP endpoint itself passed a protocol-level handshake (initialize / tools/list / tools/call).
+
+- **Claude Code** — config-verified: registered on a live installation; MCP server entry plus settings hooks for lifecycle events.
+- **Codex** — config-verified: registered on a live installation; TOML config with inline auth header.*
+- **ZCode** — **beta**: snippet follows the official skill documentation; no live instance to verify against yet.
+- **Kimi (CLI / desktop)** — config-verified: anonymous read-only access verified on a live installation; project-level MCP config; desktop needs the managed source file, not the derived one.
+- **Cursor** — config-verified: registered on a live installation; plus three lifecycle hooks (session start / stop / before submit) for broadcast integration.
 
 \* Snippets for Codex and ZCode HTTP transport follow their official or community documentation; every row's detection fingerprint and injection point was verified on a live installation. Where a detail is docs-only rather than machine-verified, the setup wizard says so explicitly instead of guessing.
 

@@ -23,7 +23,7 @@
 
 ## 怎么用
 
-0. **安装门禁引擎**（二选一）：
+0. **安装门禁引擎**（二选一）——前置：Python 3.11+；推荐路径需 [pipx](https://pipx.pypa.io/)（`brew install pipx`）：
 
    ```bash
    # pipx（推荐）：

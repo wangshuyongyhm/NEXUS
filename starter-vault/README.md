@@ -24,7 +24,8 @@ The philosophy in one line: *a rule that no machine enforces is a wish.*
 
 ## How to use it
 
-0. **Install the gate engine** (one of):
+0. **Install the gate engine** (one of) — prerequisite: Python 3.11+ and, for
+   the recommended path, [pipx](https://pipx.pypa.io/) (`brew install pipx`):
 
    ```bash
    # via pipx (recommended):

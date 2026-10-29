@@ -139,6 +139,7 @@ curl -X POST http://127.0.0.1:11537/apply_outcome \
 
 - macOS（Apple Silicon / Intel）——见下方「诚实边界」
 - Python 3.11+
+- [pipx](https://pipx.pypa.io/)（推荐——把 `nexus` CLI 装进隔离环境）
 - 带 pgvector 的 PostgreSQL（安装器可代为置备——见常见问题）
 - 一个 Obsidian 仓库（任何现成的都行——纯 Markdown 目录也够，见常见问题）
 - 至少一个受支持的 AI Agent（自带，不随包出厂）
@@ -152,12 +153,18 @@ git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 # 2. 安装——依赖探测 → 配置生成 → 服务注册
 ./install.sh
 
-# 3. 引导式接入（随 v1.0.0 发布）：安装向导扫描你的环境，
+# 3. 应用数据库 schema（当前为一个手动步骤——向导会建库但还不会自动
+#    应用 db/schema.sql；该步骤将在后续版本并入向导）
+createdb nexus_mem 2>/dev/null; psql -d nexus_mem -c 'CREATE EXTENSION IF NOT EXISTS vector'
+psql -d nexus_mem -f db/schema.sql
+ls db/migrations/*.sql | sort | xargs -I{} psql -d nexus_mem -f {}
+
+# 4. 引导式接入（随 v1.0.0 发布）：安装向导扫描你的环境，
 #    缺什么用固定选项协商（从不出开放题），探测你已装的 Agent，
 #    并为每家打印复制即用的 MCP 配置片段
 nexus init
 
-# 4. 冒烟到骨架边界：服务起来，健康端点全通，总线就绪待首次派发
+# 5. 冒烟到骨架边界：服务起来，健康端点全通，总线就绪待首次派发
 ```
 
 重复跑 `nexus init` 是安全的：doctor 模式会对账所有配置项，只报告漂移——从不覆盖你的自定义。
@@ -194,6 +201,8 @@ nexus init
 | CONSOLE | 19900 | 观测台：服务健康与监控聚合 |
 | CONSTRAINT | —（vault） | Markdown 分层路由协议：约 1KB 常驻路由层 + 按需专题文档 |
 
+> **端口是默认值。** 表中为默认端口；安装向导遇到占用会自动换道，生效值永远以 `$NEXUS_HOME/.env` 为准——拿不准时看 `.env`，别看表。
+
 - **XDR 调度总线**：派发/回调/状态查询统一通道，`task_state` 表是唯一真相源，多 Agent 状态不漂移；巡逻看护执行端健康，卡住自动救援。
 - **MEM 知识库**：BGE-M3 向量嵌入存 pgvector，FTS + 向量双路召回，文件监听增量索引。
 - **EMBED**：MEM 底层的向量嵌入服务。
@@ -224,11 +233,13 @@ NEXUS 就你的 Agent 所在地接入：调度总线上的 MCP 端点 + 一套�
 | Kimi（CLI/桌面） | `~/.kimi-code/` 或桌面应用目录 | `~/.config/kimi/AGENTS.md` / 工作区 AGENTS.md | HTTP | JSON |
 | Cursor | `~/.cursor/` | `.cursor/rules/` + AGENTS.md + hooks.json | streamable-http | JSON |
 
-- **Claude Code**——已支持：MCP server 条目 + settings hooks 接生命周期事件。
-- **Codex**——已支持：TOML 配置 + 内联鉴权头。*
-- **ZCode**——已支持：JSON 配置，legacy header 键自动迁移。*
-- **Kimi（CLI/桌面）**——已支持：项目级 MCP 配置；桌面端要写托管源文件而非派生文件。
-- **Cursor**——已支持：MCP 配置 + 三个生命周期 hook（会话开始/停止/提交前）接广播。
+分级口径：**config-verified**=在真实安装上验证过；**beta**=文档级。MCP 端点本身已通过协议级握手（initialize / tools/list / tools/call）。
+
+- **Claude Code**——config-verified：真实安装在役注册；MCP server 条目 + settings hooks 接生命周期事件。
+- **Codex**——config-verified：真实安装在役注册；TOML 配置 + 内联鉴权头。*
+- **ZCode**——**beta**：片段依据官方 skill 文档；本机暂无可验证实例。
+- **Kimi（CLI/桌面）**——config-verified：真实安装上验证过匿名只读连通；项目级 MCP 配置；桌面端要写托管源文件而非派生文件。
+- **Cursor**——config-verified：真实安装在役注册；另附三个生命周期 hook（会话开始/停止/提交前）接广播。
 
 \* Codex 与 ZCode 的 HTTP 传输片段依据其官方或社区文档；表中每行的探测特征与注入点均在真实安装上验证过。凡属「仅文档、未实机核验」的细节，安装向导会明说而不是猜。
 
