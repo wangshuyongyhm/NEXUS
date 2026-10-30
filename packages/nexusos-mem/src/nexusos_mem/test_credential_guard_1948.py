@@ -24,9 +24,9 @@ def test_all_nine_patterns_fire():
         "sk_key": "key sk-abcdef1234567890abcd end",
         "password_eq": "PASSWORD=SuperSecret123456",
         "token_eq": "TOKEN=abcdef1234567890",
-        "aws_akia": "AKIAABCDEFGHIJKLMNOP",  # gitleaks:allow — synthetic test fixture for the credential-rejection guard==
+        "aws_akia": "AKIAABCDEFGHIJKLMNOP",  # gitleaks:allow — synthetic test fixture for the credential-rejection guard==  # gitleaks:allow — synthetic test fixture for the credential-rejection guard
         "github_ghp": "ghp_abcdef1234567890abcd",
-        "google_aiza": "AIzaSyA1234567890abcdefghijklmnopqrstuv",  # gitleaks:allow — synthetic test fixture==
+        "google_aiza": "AIzaSyA1234567890abcdefghijklmnopqrstuv",  # gitleaks:allow — synthetic test fixture==  # gitleaks:allow — synthetic test fixture
         "slack_xoxb": "xoxb-1234567890-abcdef",
         "jwt_eyJ": "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9 tail",
         "private_key": "-----BEGIN RSA PRIVATE KEY-----",
