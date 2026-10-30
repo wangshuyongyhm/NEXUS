@@ -309,3 +309,7 @@ MIT — see [LICENSE](LICENSE). Copyright (c) 2026 wangyong.
 ---
 
 *Chinese version: [README.zh-CN.md](README.zh-CN.md)*
+
+## A day with NEXUS
+
+What your days look like after onboarding: [A-DAY-WITH-NEXUS.md](docs/A-DAY-WITH-NEXUS.md) — from `init` to end-of-day persist.
