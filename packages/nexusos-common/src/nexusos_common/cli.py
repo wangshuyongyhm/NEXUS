@@ -50,6 +50,19 @@ def _ask(prompt: str, choices: tuple[str, ...], default: str) -> str:
 
 def cmd_init(args) -> int:
     from nexusos_common import nexus_home
+    if getattr(args, "apply_schema", False):
+        from nexusos_common.wizard import config as _cfg
+        from nexusos_common.wizard.config import env_file_path
+        _env = env_file_path(nexus_home())
+        _dsn = "postgresql://localhost/nexus_mem"
+        if _env.is_file():
+            for _l in _env.read_text(encoding="utf-8").splitlines():
+                if _l.startswith("NEXUS_PG_DSN="):
+                    _dsn = _l.split("=", 1)[1].strip()
+        r = _cfg.apply_schema(_dsn, oss_home=getattr(args, "oss_home", None))
+        import json as _json
+        print(_json.dumps({"phase": "apply-schema", **r}, ensure_ascii=False))
+        return 0 if r["ok"] else 2
     from nexusos_common.wizard import config as cfg
     from nexusos_common.wizard import provision as prov
     from nexusos_common.wizard import scan as scan_mod
@@ -111,12 +124,22 @@ def cmd_init(args) -> int:
             vault_result = {"path": "(未提供 --vault-dir)", "created": [],
                             "detail": "A 通道缺 --vault-dir——未落盘（重跑补参）"}
     agent_reg = cfg.write_agent_registration(
-        [{"id": a["id"], "name": a["name"], "found_via": a["found_via"]} for a in scan["agents"]], home)
+        [{"id": a["id"], "name": a["name"], "found_via": a["found_via"]} for a in scan["agents"]], home,
+        port=ports["xdr"])  # 1981 端口自洽：snippets 用实际分配口
 
     if pg_choice == "a" and not args.json:
         print(prov.docker_snippet())
 
-    report = cfg.render_report(env_result, vault_result, agent_reg, provision_result, realloc)
+    schema_line = "本单 PG 置备含 nexus_meta（核心表）；mem 检索表 "
+    if dsn_for_env != "none":
+        st = cfg.schema_status(dsn_for_env)
+        schema_line = {"applied": "schema already applied ✅（mem 检索表在位）",
+                       "not-applied": "not yet — run: nexus init --apply-schema（或在骨架仓根执行）",
+                       "unknown": "状态未知（DB 不可达——--doctor 复检）"}[st]
+    else:
+        schema_line = "PG 降级（xdr-only）——无 schema 需求"
+    report = cfg.render_report(env_result, vault_result, agent_reg, provision_result, realloc,
+                               schema_line=schema_line)
     _emit({"phase": "init", "ok": True,
            "choices": {"vault": vault_choice, "pg": pg_choice},
            "scan": scan, "env": env_result, "vault": vault_result,
@@ -150,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--macos-perms", action="store_true", help="检查 macOS TCC 权限（仅 OCRX 启用时——spec 陷阱）")
     p_init.add_argument("--force", action="store_true", help="覆盖重写 .env（默认幂等不覆盖）")
     p_init.add_argument("--dry-run", action="store_true", help="置备只出 plan 不执行")
+    p_init.add_argument("--apply-schema", action="store_true",
+                        help="应用 db/schema.sql+migrations 到 DSN（需可定位骨架仓 db/）")
+    p_init.add_argument("--oss-home", default=None, help="骨架仓根（--apply-schema 定位 db/ 用）")
     p_init.set_defaults(func=lambda a: cmd_scan(a) if a.scan else (cmd_doctor(a) if a.doctor else cmd_init(a)))
 
     p_setup = sub.add_parser("setup", help="（预留：组件安装=spec §6 生态闭环位）")

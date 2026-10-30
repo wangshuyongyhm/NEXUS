@@ -41,10 +41,15 @@ http_headers = { "Authorization" = "Bearer <YOUR_TOKEN>" }
 新开 Codex 会话（MCP 仅会话创建时加载），让它调用 `search_knowledge` 检索任意关键词；
 返回条目即握手成功。
 
-### 5. hello-task 演练
+### 5. hello-task 演练（检索单闭环 = v1.0 口径）
 
 让 Codex 检索一条 NEXUS 经验并按其指引完成一个小改动，结束会话前把心得写回知识库
 （写需凭据）——完成最小闭环。
+
+**dispatch 派发演练（可选）**：v1.0 的 `/dispatch` 需要目标 Agent 的 tmux 会话在
+运行（自备 executor）。内置 `demo` 条目用法：`tmux new-session -d -s demo` 后向
+`/dispatch` 发 `{"to":"demo",...}` 即可看到投递到达；完整"派发→执行→回调"链
+见 ROADMAP v1.1（executor 生态）。
 
 ## 已知坑（实机记录）
 

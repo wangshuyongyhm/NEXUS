@@ -99,20 +99,32 @@ else
 fi
 
 # ── 6. service registration ──────────────────────────────────────────────
-say "→ [6/6] service registration"
-case "$(uname -s)" in
-  Darwin)
-    say "  macOS: launchd plists would be generated from templates/launchd/*.plist"
-    say "  with __NEXUS_HOME__/__PYTHON_BIN__ placeholders substituted here."
-    say "  NOTE: macOS TCC requires manually granting Full Disk Access to the"
-    say "  python binary used by launchd jobs (System Settings → Privacy)."
-    ;;
-  Linux)
-    say "  TODO(linux): systemd --user units — translation layer not built yet."
-    say "  Seam: everything above is platform-neutral; only this step differs."
-    ;;
-  *) warn "unknown platform $(uname -s) — services not registered" ;;
-esac
+say "→ [6/6] service registration (manual load — templates generated)"
+LAUNCHD_DIR="$NEXUS_HOME/launchd"
+mkdir -p "$LAUNCHD_DIR"
+cat > "$LAUNCHD_DIR/com.nexus.xdr-server.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.nexus.xdr-server</string>
+  <key>ProgramArguments</key><array>
+    <string>$VENV/bin/python3</string><string>-m</string><string>nexusos_xdr.mcp_server</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$NEXUS_HOME/xdr-server.log</string>
+  <key>StandardErrorPath</key><string>$NEXUS_HOME/xdr-server.log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>NEXUS_HOME</key><string>$NEXUS_HOME</string>
+  </dict>
+</dict></plist>
+PLIST
+ok "launchd template: $LAUNCHD_DIR/com.nexus.xdr-server.plist"
+say "  手动启用（本单不自动加载）："
+say "    set -a; source $NEXUS_HOME/.env; set +a"
+say "    launchctl load $LAUNCHD_DIR/com.nexus.xdr-server.plist"
+say "  或前台/后台直跑：nohup $VENV/bin/python3 -m nexusos_xdr.mcp_server > $NEXUS_HOME/xdr-server.log 2>&1 &"
+say "  健康检查：curl 127.0.0.1:\${NEXUS_XDR_PORT:-19998}/health"
+say "  CLI 路径提示：export PATH="$VENV/bin:\$PATH"（nexus 命令在专用 venv 内）"
 
 if grep -q 'vault_root = ""' "$CONFIG"; then
   say ""

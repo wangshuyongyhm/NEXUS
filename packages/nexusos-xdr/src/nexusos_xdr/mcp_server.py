@@ -160,6 +160,8 @@ logging.basicConfig(
     stream=sys.stderr,  # MCP 模式 stdout 被协议占用，日志走 stderr
 )
 logger = logging.getLogger("nexusos-xdr.mcp")
+
+RUNTIME_PORT = int(os.environ.get("NEXUS_XDR_PORT", 0) or 19998)  # 1981：/health 回显真实监听口（main 覆写）
 # 1970 启动更新提示（一次性日志行；feed off/同版零输出；缓存读+后台刷新零阻塞）
 try:
     from nexusos_common.update_check import server_notify
@@ -283,7 +285,7 @@ async def http_health(request: Request) -> JSONResponse:
         "status": "ok",
         "service": "nexusos-xdr",
         "version": "1.0.0",
-        "port": 19998,
+        "port": RUNTIME_PORT,
         "knowledge_base": "connected" if kb_ok else "disconnected",
         "agents": agents,
         "active_tasks": len(active),
@@ -387,7 +389,7 @@ async def http_system_dump(request: Request) -> JSONResponse:
     return JSONResponse({
         "service": "nexusos-xdr",
         "version": "1.0.0",
-        "port": 19998,
+        "port": RUNTIME_PORT,
         "agents": agents,
         "sessions": sessions,
         "active_tasks": active_tasks,
@@ -756,8 +758,12 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="nexusos-xdr MCP Server")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=19998)
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("NEXUS_XDR_PORT", 0) or 19998),
+                        help="默认 NEXUS_XDR_PORT env > 19998（1981 端口自洽）")
     args = parser.parse_args()
+    global RUNTIME_PORT
+    RUNTIME_PORT = args.port
 
     logger.info(f"启动 nexusos-xdr MCP Server: {args.host}:{args.port}")
     logger.info(f"MCP 端点: http://{args.host}:{args.port}/mcp")

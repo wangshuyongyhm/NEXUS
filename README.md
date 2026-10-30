@@ -157,11 +157,10 @@ git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 # 2. Install — dependency detection → config generation → service registration
 ./install.sh
 
-# 3. Apply the database schema (one manual step today — the wizard provisions
-#    the database but does not yet apply db/schema.sql; this step will move
-#    into the wizard in a coming release)
-createdb nexus_mem 2>/dev/null; psql -d nexus_mem -c 'CREATE EXTENSION IF NOT EXISTS vector'
-psql -d nexus_mem -f db/schema.sql
+# 3. Apply the database schema (wizard provisions DB+extension+role;
+#    schema tables are one explicit step — run from the repo root, or skip
+#    if `nexus init` already reported "schema already applied")
+nexus init --apply-schema          # or: psql -d nexus_mem -f db/schema.sql && \
 ls db/migrations/*.sql | sort | xargs -I{} psql -d nexus_mem -f {}
 
 # 4. Guided onboarding (shipping with v1.0.0): the setup wizard scans your
@@ -173,6 +172,27 @@ nexus init
 # 5. Smoke-test to the skeleton's boundaries: services up, health
 #    endpoints answering, the bus ready for its first dispatch.
 ```
+
+> **CLI path**: the installer creates a dedicated venv, so put its binaries on PATH first:
+> `export PATH="$NEXUS_HOME/venv/bin:$PATH"` (add to your shell profile).
+
+## Start the services
+
+The MCP/HTTP server is one process (reads `NEXUS_XDR_PORT` from `$NEXUS_HOME/.env`,
+default 19998 — the wizard writes the actual port there if it had to relocate):
+
+```bash
+export PATH="$NEXUS_HOME/venv/bin:$PATH"
+set -a; source "$NEXUS_HOME/.env"; set +a
+nohup python3 -m nexusos_xdr.mcp_server > "$NEXUS_HOME/xdr-server.log" 2>&1 &
+curl "http://127.0.0.1:${NEXUS_XDR_PORT:-19998}/health"   # {"status":"ok","port":<real port>,...}
+```
+
+Stop with `pkill -f nexusos_xdr.mcp_server`. macOS users can alternatively load the
+launchd template the installer generates (`$NEXUS_HOME/launchd/com.nexus.xdr-server.plist`,
+manual `launchctl load` — see the end of `install.sh` output). The `nexus init` report
+prints these commands (plus agent MCP snippets with the *actual* port) every run, and
+`nexus init --doctor` re-checks everything.
 
 Re-running `nexus init` is safe: doctor mode re-checks everything and only reports drift — it never overwrites your customizations.
 

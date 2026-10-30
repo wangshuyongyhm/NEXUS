@@ -96,7 +96,8 @@ def write_starter_vault(vault_dir: Path) -> dict:
             "detail": f"模板落盘（新增 {len(created_items)} 项，幂等）"}
 
 
-def write_agent_registration(agents: list[dict], home: Path | None = None) -> dict:
+def write_agent_registration(agents: list[dict], home: Path | None = None,
+                             port: int = 19998) -> dict:
     """检测到的 Agent 注册（.nexus/agents-detected.json）+ MCP 片段输出。"""
     from nexusos_common.wizard.factsheet import snippet_all
     home = home or nexus_home()
@@ -107,20 +108,21 @@ def write_agent_registration(agents: list[dict], home: Path | None = None) -> di
     snippets_dir = home / "mcp-snippets"
     snippets_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for s in snippet_all():
+    for s in snippet_all(port=port):
         ext = "toml" if s["format"] == "toml" else "json"
         f = snippets_dir / f"{s['agent']}.{ext}"
         body = s["snippet"]
         if ext == "json":
             body = "{\n  " + body.split("{", 1)[1] if body.startswith("{") else body
-        f.write_text(f"# target: {s['target']}\n# inject: {s['inject_point']}\n"
+        f.write_text(f"# port={port}（本机实际，1981 自洽；重跑 init 刷新）\n# target: {s['target']}\n# inject: {s['inject_point']}\n"
                      f"# notes: {s['notes']}\n{body}\n", encoding="utf-8")
         written.append(f.name)
     return {"registry": str(reg), "snippets": written}
 
 
 def render_report(env_result: dict, vault_result: dict, agent_reg: dict,
-                  provision_result: dict | None, port_realloc: dict) -> str:
+                  provision_result: dict | None, port_realloc: dict,
+                  schema_line: str = "状态未知（--doctor 复检）") -> str:
     lines = ["初始化报告（Phase4）", ""]
     lines.append("## 动作清单")
     lines.append(f"- .env：{env_result['detail']}（{env_result['path']}）")
@@ -133,8 +135,49 @@ def render_report(env_result: dict, vault_result: dict, agent_reg: dict,
         lines.append(f"- 端口自动换：{port_realloc}（已写入 .env）")
     else:
         lines.append("- 端口：默认六口无冲突")
-    lines += ["", "## 下一步（hello-task 演练）",
-              "  1. 启动组件后，在 Agent 会话输入「初始化」走 NEXUS 技能（AGENTS.md 注入片段）",
-              "  2. 或直接：nexus init --doctor 复检全绿",
-              "  3. dispatch 一个 hello-task 任务跑通五层资产闭环"]
+    lines += ["", "## 下一步（Next steps）",
+              f"  0. CLI 路径（首次必做）：export PATH=\"$NEXUS_HOME/venv/bin:$PATH\"（nexus 命令在专用 venv 内）",
+              "  1. 应用 DB schema：" + schema_line,
+              "  2. 启动服务：nohup python3 -m nexusos_xdr.mcp_server > $NEXUS_HOME/xdr-server.log 2>&1 &"
+              "（端口自动读 .env 的 NEXUS_XDR_PORT；健康检查 curl 127.0.0.1:$NEXUS_XDR_PORT/health）",
+              "  3. 注册 MCP：把 mcp-snippets/<你的Agent> 片段贴进对应配置（端口已按本机实际注入）后重启该 Agent 会话",
+              "  4. 复检：nexus init --doctor 全绿后，在 Agent 会话输入「初始化」走 NEXUS 技能演练"]
     return "\n".join(lines)
+
+
+def schema_status(dsn: str) -> str:
+    """DB schema 应用状态（1981 修5：消除"README 手动步骤 vs 向导"歧义）。"""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dsn, connect_timeout=3)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name='knowledge' LIMIT 1")
+            applied = cur.fetchone() is not None
+        conn.close()
+        return "applied" if applied else "not-applied"
+    except Exception:
+        return "unknown"
+
+
+def apply_schema(dsn: str, oss_home: str | None = None) -> dict:
+    """nexus init --apply-schema：从骨架仓 db/ 应用 schema+migrations。"""
+    from pathlib import Path as _P
+    cands = []
+    if oss_home:
+        cands.append(_P(oss_home))
+    cands += [_P.cwd(), _P.cwd().parent]
+    db_dir = next((c / "db" for c in cands if (c / "db" / "schema.sql").is_file()), None)
+    if db_dir is None:
+        return {"ok": False, "detail": "未定位 db/schema.sql（在骨架仓根运行，或 --oss-home 指向仓根）"}
+    import psycopg2, glob
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    conn.autocommit = True
+    applied = []
+    with conn.cursor() as cur:
+        cur.execute(open(db_dir / "schema.sql", encoding="utf-8").read())
+        applied.append("schema.sql")
+        for f in sorted(glob.glob(str(db_dir / "migrations" / "*.sql"))):
+            cur.execute(open(f, encoding="utf-8").read())
+            applied.append(_P(f).name)
+    conn.close()
+    return {"ok": True, "detail": f"已应用：{', '.join(applied)}"}

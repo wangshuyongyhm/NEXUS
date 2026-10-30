@@ -424,7 +424,8 @@ def dispatch(
         # 区分"session不存在"(503，可重启) vs "session忙碌"(409，等)
         if not agent.has_session():
             raise _dep('DispatchError')(
-                f"Agent {to} session 不存在（需重启小弟: start_tool.sh start {to}）",
+                f"Agent {to} session 不存在（需其 tmux 会话在运行：tmux new-session -d -s {to}；"
+                f"vault 部署侧另有 start_tool.sh start {to}）",
                 status_code=503,
             )
         if not agent.is_idle():
