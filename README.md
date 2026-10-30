@@ -133,6 +133,10 @@ curl -X POST http://127.0.0.1:11537/apply_outcome \
 
 ## Quickstart (≈15 minutes)
 
+### Chat-triggered init (optional, recommended)
+
+Paste [`docs/agents/INIT-SKILL.zh.md`](docs/agents/INIT-SKILL.zh.md) (or adapt it) into your agent's instruction file (AGENTS.md / CLAUDE.md / rules). Then, in any **new session**, typing **`初始化`** (or `initialize` / `setup`) makes your agent run `nexus init --json` for you and walk you through provisioning — no terminal needed.
+
 The smoke path below was black-box verified end to end: from a clean checkout to the skeleton's boundaries in about 15 minutes.
 
 **Prerequisites**
