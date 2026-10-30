@@ -3,9 +3,9 @@
 [English](./README.md) | **简体中文**
 
 
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey)](#)
+[![CI](https://github.com/wangshuyongyhm/NEXUS/actions/workflows/ci.yml/badge.svg)](https://github.com/wangshuyongyhm/NEXUS/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://github.com/wangshuyongyhm/NEXUS)
 
 > **带上你自己的 AI Agent**（Claude Code、Codex、Kimi（App/CLI）、ZCode、Cursor……）**和你自己的 Obsidian 仓库，就能获得一套生产级多 Agent 编排系统**：带单一真相源的任务派发、双路检索的共享知识库、声明式质量门禁、跨 Agent 在场感知，以及自我验证的记忆闭环。
 

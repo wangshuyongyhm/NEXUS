@@ -3,9 +3,9 @@
 **English** | [简体中文](./README.zh-CN.md)
 
 
-[![CI](https://img.shields.io/badge/CI-GitHub_Actions-lightgrey)](#)
+[![CI](https://github.com/wangshuyongyhm/NEXUS/actions/workflows/ci.yml/badge.svg)](https://github.com/wangshuyongyhm/NEXUS/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](#)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://github.com/wangshuyongyhm/NEXUS)
 
 > **Bring your own AI agent** (Claude Code, Codex, Kimi (app / CLI), ZCode, Cursor, …) **and your own Obsidian vault — and get a production-grade multi-agent orchestration system**: task dispatch with a single source of truth, a shared knowledge base with hybrid retrieval, declarative quality gates, cross-agent presence awareness, and a self-verifying memory loop.
 
