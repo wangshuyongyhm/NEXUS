@@ -300,4 +300,4 @@ MIT —— 见 [LICENSE](LICENSE)。Copyright (c) 2026 wangyong。
 
 ## 一天长什么样
 
-集成后你的一天：[A-DAY-WITH-NEXUS.zh.md](docs/A-DAY-WITH-NEXUS.zh.md) ——从「初始化」到日落盘的完整旅程。
+集成后你的一天：[A-DAY-WITH-NEXUS.zh-CN.md](docs/A-DAY-WITH-NEXUS.zh-CN.md) ——从「初始化」到日落盘的完整旅程。
