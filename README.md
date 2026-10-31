@@ -29,6 +29,23 @@ NEXUS does not replace your AI coding tools. It gives them an operating system.
 - [Author](#author)
 - [License](#license)
 
+> **The 30-second version.** Your AI agents are silos: context dies at compaction,
+> experience doesn't compound, and "rules" in markdown enforce nothing.
+> NEXUS is the layer that makes them a fleet — one dispatch ledger, one shared
+> memory, machine-enforced gates.
+
+```
+  Your agents, unchanged          What NEXUS adds
+ ┌─────────────────────┐      ┌──────────────────────────┐
+ │ Claude Code · Codex │      │ XDR  — dispatch ledger   │
+ │ Kimi · Cursor · ZCode ───► │ MEM  — shared memory     │
+ └─────────────────────┘      │ GATE — rules as code     │
+                              │ PRESENCE — anti-collision│
+                              └──────────────────────────┘
+```
+
+*Bring your own agent, bring your own vault. [Get started in ~15 minutes](#quickstart-15-minutes).*
+
 ## Why NEXUS
 
 If you use AI coding agents daily, you have probably hit these walls:
