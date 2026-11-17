@@ -6,7 +6,7 @@
 本助手把发现策略接口化为显式链，杀 parents[N]：
 
     explicit 参数 > env NEXUS_CODEGRAPH_PROJECT（直指项目根）
-    > env NEXUS_ROOT（vault 布局：优先 {vault}/05-System/自动化脚本
+    > env NEXUS_VAULT_ROOT（vault 布局：优先 {vault}/05-System/自动化脚本
       的 .codegraph 私人深链探测，退 {vault} 本身——均在 .codegraph 存在
       才认）> git repo root（从 start 向上找 .git）> None
 
@@ -43,7 +43,7 @@ def resolve_workspace_root(explicit: str | None = None, start: Path | None = Non
     if env_direct:
         p = Path(env_direct).expanduser()
         return p if p.is_dir() else None
-    env_vault = os.environ.get("NEXUS_ROOT", "").strip()
+    env_vault = os.environ.get("NEXUS_VAULT_ROOT", "").strip()
     if env_vault:
         cand = _vault_candidate(env_vault)
         if cand is not None:

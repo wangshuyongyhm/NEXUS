@@ -1,0 +1,317 @@
+# code 场景门禁 — git commit 前检查
+# 对应设计 §3.2 C1-C7 + §9 详设计。拦常见"看似完成实则埋雷"的代码模式。
+#
+# 诚实边界(§9.2 不 gate,靠人工 review):
+#   - DRY/抽象必要性(主观)
+#   - 阈值掩盖(目的不可自动判定)
+#   - 架构优雅(主观)
+version: 1
+scenario: code
+description: 提交前代码门禁(改动范围/反模式/删除说明/测试/产出质量)
+required_context:
+  - {name: changed_files, desc: "改动文件列表(空则 file_size/git_diff_scope 自动从 git diff 兜底)", required: false}
+  - {name: commit_msg, desc: "提交信息", required: true}
+  - {name: task_scope, desc: "任务允许改动的目录列表", required: false}
+  - {name: project_root, desc: "项目根(git repo)", required: false}
+items:
+  # C1: 改动范围合规(硬)——不碰 task_scope 之外的目录
+  - id: C1
+    name: 改动范围合规
+    auto: true
+    severity: REJECT
+    check:
+      type: git_diff_scope
+      task_scope: "{task_scope}"
+      project_root: "{project_root}"
+
+  # C2: 无 sleep 绕过(硬)——排除了 test
+  # Task1566: 行内注解豁免通道——`# c2-allow: <理由>` 且理由非空才豁免
+  # （1559 cred-reaper 被迫 [C2-exempt]+--no-verify 绕过的根治）
+  - id: C2
+    name: 无 sleep 绕过
+    auto: true
+    severity: REJECT
+    check:
+      type: grep_in_diff
+      pattern: 'time\.sleep'
+      allow_pattern: '#\s*c2-allow:\s*(\S.*)$'
+      exclude_files:
+        - "*test*"
+        - "*_test.py"
+        - "tests/*"
+        - "*.md"          # Task541: 文档描述性文字不是代码
+        - "task/*"        # Task541: task 产物目录(reproduce.sh 是复现脚本非生产代码)
+      project_root: "{project_root}"
+
+  # C3: 无 except 吞错(软)——bare except: pass
+  - id: C3
+    name: 无 except 吞错
+    auto: true
+    severity: WARN
+    check:
+      type: grep_in_diff
+      pattern: 'except.*:\s*$'
+      require_pattern: 'pass'
+      project_root: "{project_root}"
+
+  # C4: 删除有 mention(硬)——删了代码要在 commit_msg 里说明
+  - id: C4
+    name: 删除有 mention
+    auto: true
+    severity: REJECT
+    check:
+      type: deletion_mentioned
+      commit_msg: "{commit_msg}"
+      project_root: "{project_root}"
+
+  # C5: 测试通过(硬)——只跑 staged 改动里的测试文件
+  # Task519: 原版 find 全 Vault 发现有测试就 `pytest -q`(无路径)扫全库 → 120s 超时误拦。
+  # 改为 staged 无测试文件 → skip；有 → 只跑那些文件(有边界不超时)。
+  # 保留 rc=5(no tests collected)视为 pass 的旧行为；无 staged 测试时依赖 C8 验证证据兜底。
+  - id: C5
+    name: 测试通过
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        py_changed=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=d 2>/dev/null | grep -E '(^|/)(test_.*\.py$|.*_test\.py$|conftest\.py$)' | grep -v '/output/files/' | grep -v 'conftest\.py$' || true);
+        if [ -z "$py_changed" ]; then echo "no test in staged changes, skip pytest (relies on C8 evidence)"; exit 0; fi;
+        python3 -m pytest -q $py_changed 2>&1 | tail -5;
+        rc=${PIPESTATUS[0]};
+        [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] && echo "OK(rc=$rc)" || { echo "FAIL(rc=$rc)"; exit 1; }
+      expect_rc: 0
+      timeout: 120
+
+  # C6: 无注释化删除(软)——把代码改成注释假装删了
+  - id: C6
+    name: 无注释化删除
+    auto: true
+    severity: WARN
+    check:
+      type: comment_out_detection
+      project_root: "{project_root}"
+
+  # C7: 代码产出质量(硬)——改动总和 ≥ 1KB(防空提交/占位)
+  - id: C7
+    name: 代码产出质量
+    auto: true
+    severity: REJECT
+    check:
+      type: file_size
+      files: "{changed_files}"
+      min_total_kb: 1
+
+  # C8: 验证证据强制(硬)——代码改动必须有验证证据,没验证=不可信=不该进体系
+  # Task387-oc-c8(2026-07-31): 用户诉求"动了代码没经验证测试的都不可信"
+  # 5 路径(任一满足): 纯文档豁免 / verify 文件 / 测试覆盖 / task 验证产出 / 声明式路径豁免
+  # 配合 C5(无测试时 pass 但依赖 C8 兜底) → 完整覆盖
+  - id: C8
+    name: 验证证据
+    auto: true
+    severity: REJECT
+    check:
+      type: verification_evidence
+      # Task1401-d3（用户裁决“gate 加豁免”）：备份镜像目录——纯 rsync 字节复制，
+      # 非一手代码，无“验证证据”语义可给。范围严格限此一个目录，勿扩。
+      # 语义边界：豁免路径内的文件不参与“需证据”判定；其余改动照常走上面 4 条路径。
+      exempt_paths:
+        - "05-System/自动化脚本/hermes-scripts-backup/"
+
+  # C9: 文档一致性(软)——改md时验证引用的路径/端口/脚本实际存在
+  # md是活标准不是豁免品,改md=改标准,必须验证描述和实现一致
+  - id: C9
+    name: 文档一致性
+    auto: true
+    severity: WARN
+    check:
+      type: doc_consistency
+      files: "{changed_files}"
+      project_root: "{project_root}"
+
+  # C10: 引用漂移检测(硬)——改/删 NEXUS-CONSTRAINT 文件后外部引用不能失效
+  # 2026-08-03 会话08031120: knowledge.md 合并到 nexusos-mem.md 但 NEXUS-ACTIVE.md
+  # 仍引旧名→M1 报 error→META anti-check 连锁失败。改约束文件时强制跑 check-refs。
+  # 已知盲区: git diff HEAD 只检测 working tree vs HEAD。staged 但未 commit / stash /
+  # amend 场景可能漏检。边界情况,常规 commit 流程不受影响。
+  - id: C10
+    name: 引用漂移检测
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 条件触发:只改了 NEXUS-CONSTRAINT 文件才跑 write.py --check-refs
+      # 没改约束文件直接 pass(不相关 commit 不跑引用校验)
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        if ! git diff --name-only HEAD 2>/dev/null | grep -q 'NEXUS-CONSTRAINT'; then
+          echo "no CONSTRAINT changes, skip"; exit 0;
+        fi;
+        out=$(python3 05-System/NEXUS-CONSTRAINT/write.py --check-refs 2>&1);
+        echo "$out" | grep -q '❌' && { echo "$out" | grep '❌'; exit 1; } || echo "refs OK"
+      expect_rc: 0
+      timeout: 30
+
+  # C11: 监控清单过时检测(软)——改 nexus-monitor checks 时校验 MODULES 与实际一致
+  # 2026-08-03 会话08031120: check_M7 MODULES 含已 REACTIVATED 的 context_monitor
+  # 和从未 deprecated 的 paths_setup→假阳性告警。改监控脚本时校验清单与模块状态一致。
+  - id: C11
+    name: 监控清单过时检测
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 条件触发:只改了 nexus-monitor/checks 才校验 MODULES 清单
+      # 校验: M7 的 MODULES 里的模块,模块 docstring 头部(前5行)是否真标 DEPRECATED
+      # 注意:只看模块级 deprecated(头注释),不看函数级(全文 grep 会误判 shared.py 有废弃函数)
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        if ! git diff --name-only HEAD 2>/dev/null | grep -q 'nexus-monitor/checks'; then
+          echo "no monitor check changes, skip"; exit 0;
+        fi;
+        m7="05-System/自动化脚本/nexus-monitor/checks/check_M7_dead_module.sh";
+        [ -f "$m7" ] || { echo "M7 check 不存在, skip"; exit 0; };
+        mismatch=0;
+        for mod in $(grep -oE 'MODULES=\([^)]*\)' "$m7" | grep -oE '[a-z_]+' | grep -v MODULES); do
+          f="05-System/自动化脚本/nexus/$mod.py";
+          [ -f "$f" ] || continue;
+          head -5 "$f" | grep -q 'DEPRECATED' || { echo "⚠️ $mod 在 MODULES 但模块头未标 DEPRECATED"; mismatch=1; };
+        done;
+        [ "$mismatch" -eq 0 ] && echo "MODULES consistent" || exit 1
+      expect_rc: 0
+      timeout: 20
+
+  # C12: services.yaml 完整性(软)——改服务清单时校验常驻服务全覆盖
+  # 2026-08-03 会话08031120: 定时任务 exit=1 静默失效,根因之一是
+  # services.yaml 可能漏配常驻服务→S1/S2 监控漏检。改 services.yaml 时校验完整性。
+  # 注意:只校验常驻服务(PID 不为-),定时任务(跑完即退 PID=-)不需要端口探活
+  - id: C12
+    name: services.yaml 完整性
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 条件触发:只改了 services.yaml 才校验
+      # 校验: launchctl list 的常驻 ai.nexus.* 服务(PID 不为-)是否都在 services.yaml
+      # 定时任务(PID=-)不需要端口探活,不在 services.yaml 是正常的
+      # 例外:scheduler 由 S5 专属监控覆盖(check_S5_scheduler_alive.sh),不在此处(无端口)
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        if ! git diff --name-only HEAD 2>/dev/null | grep -q 'services.yaml'; then
+          echo "no services.yaml change, skip"; exit 0;
+        fi;
+        svc="05-System/自动化脚本/nexus-monitor/etc/services.yaml";
+        [ -f "$svc" ] || { echo "services.yaml 不存在, skip"; exit 0; };
+        missing=0;
+        for plist in $(launchctl list 2>/dev/null | awk '$1 != "-" && $3 ~ /ai.nexus/ {print $3}'); do
+          case "$plist" in
+            ai.nexus.scheduler) continue;;  # S5 专属监控覆盖
+          esac;
+          grep -q "$plist" "$svc" || { echo "⚠️ 常驻服务 $plist 不在 services.yaml(S1/S2 会漏检)"; missing=1; };
+        done;
+        [ "$missing" -eq 0 ] && echo "services.yaml covers all resident services" || exit 1
+      expect_rc: 0
+      timeout: 15
+
+  # C13: 对抗式审查（WARN）——代码改动提醒做过对抗式审查（红队思维）
+  # thinking-methodology.md §2 的代码强制层。2026-10-14 用户裁定升 REJECT（三周零误报记录）。
+  - id: C13
+    name: 对抗式审查
+    auto: true
+    severity: REJECT
+    check:
+      type: adversarial_review
+
+  # ================= Task816 审计三件套（用户定向 08270035：异常处理/日志/契约）================
+  # 全部 WARN 起步（C13 同款路径）——升级条件：跑稳 2 轮 LOOP（误报率人工评估 <20%）后升 REJECT
+
+  # C14: 异常处理完备性（WARN）——staged py 文件过 ruff（E722 裸 except / BLE001 盲捕 /
+  # TRY400 except 内 error 应 exception / TRY401 冗余插值 / G 系列 logging）
+  # 降级原则（陷阱2）：ruff 未安装/配置缺失 → skip 不 FAIL
+  - id: C14
+    name: 异常处理完备性
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        py_changed=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=d 2>/dev/null | grep -E '\.py$' | grep -vE '(^|/)(tests?_[^/]*|test_[^/]*|conftest)\.py$|/tests/' || true);
+        [ -z "$py_changed" ] && { echo "no py staged, skip"; exit 0; };
+        RUFF=$(command -v ruff || echo "");
+        [ -z "$RUFF" ] && { echo "ruff 未安装，降级 skip（不 FAIL）"; exit 0; };
+        RUFF_TOML="{vault_root}/05-System/自动化脚本/pypi/nexusos-gate/etc/ruff-nexus.toml";
+        [ -f "$RUFF_TOML" ] || { echo "ruff-nexus.toml 缺失，skip"; exit 0; };
+        out=$($RUFF check --config "$RUFF_TOML" $py_changed 2>&1);
+        echo "$out" | head -15;
+        echo "$out" | grep -qE "E722|BLE001|TRY400|TRY401|G[0-9]{3}" && exit 1 || echo "C14 ruff 异常处理检查通过"
+      expect_rc: 0
+      timeout: 60
+
+  # C15: 可观测性（WARN）——staged diff 新增 except 块必须有 logger.warning/error/exception
+  # （或显式 `# silent: 理由` 声明静默）；仅 logger.debug=吞错命中（main.py:289 同款坑）。
+  # 语义层检查 ruff 覆盖不了，走自研 audit_checks.py
+  - id: C15
+    name: 可观测性（except 块必须有日志）
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        py_changed=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=d 2>/dev/null | grep -E '\.py$' || true);
+        [ -z "$py_changed" ] && { echo "no py staged, skip"; exit 0; };
+        AUDIT="{vault_root}/05-System/自动化脚本/pypi/nexusos-gate/etc/audit_checks.py";
+        [ -f "$AUDIT" ] || { echo "audit_checks.py 缺失，skip"; exit 0; };
+        python3 "$AUDIT" observability "${PROJECT_ROOT:-.}"
+      expect_rc: 0
+      timeout: 30
+
+  # C16: 跨端契约提醒（WARN）——diff 触及 Redis 键读写/API 路由/WS 频道 →
+  # 强制提醒"任务书须附写读双方对齐证据"（今晚 12 断链全是键格式/TTL/枚举/字段名四模式）
+  - id: C16
+    name: 跨端契约提醒
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        AUDIT="{vault_root}/05-System/自动化脚本/pypi/nexusos-gate/etc/audit_checks.py";
+        [ -f "$AUDIT" ] || { echo "audit_checks.py 缺失，skip"; exit 0; };
+        python3 "$AUDIT" contract "${PROJECT_ROOT:-.}"
+      expect_rc: 0
+      timeout: 30
+
+  # C17: 并发考虑声明（WARN，Task1542）——池 #212 用户定向「写出的代码一定要有并发考虑」。
+  # 与 C13（对抗式审查）同款路径：证据三选一（非代码豁免 / commit_msg [concurrency:...] /
+  # test_*concurrency* 陪跑），全不满足 → WARN 软提醒（不拦 commit）。
+  # 边界：只做"想过没有"的声明式自查触发器，**不做代码级静态并发分析**（并发正确性机器验不了）。
+  # 升级路径：跑稳 + 误报率人工评估 <20% 后由主控裁决升 REJECT（C13/C14-C16 同款纪律）。
+  # 依据：Task1529 压测基线（同目标并发派单/回调洪流/op-log 窗口/PG 行锁/文件同写 → 3 降级 0 破坏）。
+  - id: C17
+    name: 并发考虑声明
+    auto: true
+    severity: WARN
+    check:
+      type: concurrency_declared
+
+  # C18: 注释审计（WARN，T1648）——§7.7 机器化：①diff 触及 def/class 无 docstring
+  # ②新增 # 注释纯 ASCII 疑似英文模板 ③连续≥3 行 # 呈代码特征=注释掉的代码。
+  # WARN 提醒非禁止；跑稳 2 轮误报率 <20% 再评估升 REJECT（循 C13/C14 节奏）。
+  - id: C18
+    name: 代码注释审计（docstring/中文白话/残渣）
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: >
+        cd "${PROJECT_ROOT:-.}";
+        py_changed=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=d 2>/dev/null | grep -E '\.py$' || true);
+        [ -z "$py_changed" ] && { echo "no py staged, skip"; exit 0; };
+        AUDIT="{vault_root}/05-System/自动化脚本/pypi/nexusos-gate/etc/audit_checks.py";
+        [ -f "$AUDIT" ] || { echo "audit_checks.py 缺失，skip"; exit 0; };
+        python3 "$AUDIT" comment "${PROJECT_ROOT:-.}"
+      expect_rc: 0
+      timeout: 30

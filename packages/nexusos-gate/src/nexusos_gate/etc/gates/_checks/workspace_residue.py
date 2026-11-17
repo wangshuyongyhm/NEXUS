@@ -93,7 +93,7 @@ def _touched(path: str, touched_dirs: list) -> bool:
 
 def check(params: dict, context: dict, agent: str) -> tuple:
     whitelist = params.get("whitelist") or []
-    vault_root = context.get("vault_root") or params.get("cwd") or os.environ.get("NEXUS_ROOT")
+    vault_root = context.get("vault_root") or params.get("cwd") or os.environ.get("NEXUS_VAULT_ROOT")
     if not vault_root or "{" in str(vault_root):
         return True, "vault_root 不可解析——跳过残量检查(fail-open)"
     vr = Path(vault_root)

@@ -177,17 +177,8 @@ class _Handler(BaseHTTPRequestHandler):
 from nexusos_mem._vault_env import VAULT_ROOT as _VR_SRC  # Task702: 单源（env>哨兵推导）
 _VAULT_ROOT = str(_VR_SRC)
 _DEBOUNCE_SEC = 0.8  # Task 333: 去抖 2.0→0.8 降延迟（content_hash 去重防高频写爆 encode）
-_FSEVENTS_SKIP_DIRS = {
-    ".obsidian", ".git", ".trash", ".zcode", "__pycache__",
-    ".smart-env", "node_modules", "copilot", ".DS_Store",
-    "99-Archive",  # 归档文件不 embed
-    "hermes-scripts-backup",  # 脚本镜像不 embed
-    "health-reports",  # 健康报告不 embed
-    "reports",  # 运行报告不 embed
-    ".hermes",  # Hermes 配置不 embed
-    # Task 333: 移除 "sessions" — 01-Projects/sessions/ 是有效归档不应跳过
-    # （原用 s in parts 匹配任意层级 sessions 目录，误杀 01-Projects/sessions/）
-}
+# 目录排除单一真源（task 2611111530）：隐藏目录通配 + 具名清单见 skip_rules
+from nexusos_mem.skip_rules import should_skip as _should_skip_dir
 # Task611: 密钥真源文件永不 embed（目录级 SKIP 管不到顶层文件——文件级黑名单）
 _SECRET_MD_FILES = {"SECRETS.md"}
 
@@ -344,9 +335,9 @@ def _should_embed(rel_path: str) -> bool:
     # Task611: 密钥真源文件级排除（防 SECRETS.md 内容进向量库）
     if parts[-1] in _SECRET_MD_FILES:
         return False
-    for skip in _FSEVENTS_SKIP_DIRS:
-        if skip in parts:
-            return False
+    # 目录排除：任一目录组件隐藏或具名即拒收（skip_rules 单一真源）
+    if _should_skip_dir(parts[:-1]):
+        return False
     # Task 564: 镜像准入（拒收任务过程文件/trace——检索价值≈0，从源头减量）
     admit, reason, _slug = _mirror_admission(rel_path)
     if not admit:

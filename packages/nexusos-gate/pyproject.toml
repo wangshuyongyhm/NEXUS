@@ -32,10 +32,12 @@ persist_pool_ledger = "nexusos_gate.persist_pool_ledger"
 
 # 开源仓库落位（M1 脱敏建仓）后更新为真实主页；切片器不再补注（单一真源）
 [project.urls]
-Homepage = "https://github.com/nexus-family/nexusos-gate"
+Homepage = "https://github.com/wangshuyongyhm/nexusos-gate"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
+"nexusos_gate.etc.gates" = ["*.yaml", "README.md"]
+"nexusos_gate.etc.gates._checks" = ["*.yaml", "*.md"]
 "nexusos_gate.etc.checks.examples" = ["*.yaml", "*.md"]

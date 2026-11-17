@@ -1,15 +1,56 @@
-# term_dict.yaml — search.py 查询扩展术语词典（示例版 · Task1949）
-# 正式版含私项目术语；OSS 部署按需改写（schema 不变：{术语key: [同义词列表]}）。
+# term_dict.yaml — search.py 查询扩展术语词典（Task 282 P2-4）
+# 原 nexus/search.py:126 _TERM_DICT 硬编码，现外置到 YAML
+# 格式: {术语key: [同义词列表]}
 
-# 示例项目术语
-demo-tool:
-  - demo tool
-  - 演示工具
-  - demo toolkit
-demo-pipeline:
-  - demo pipeline
-  - 演示流水线
-  - example workflow
+# stzb 逆向术语
+npk:
+  - neox package
+  - 脚本包
+  - script.npk
+frame:
+  - 帧
+  - frame index
+  - 字节码帧
+patch:
+  - 补丁
+  - bytecode patch
+  - smali patch
+cmd:
+  - command
+  - 协议命令
+  - netcommand
+gateway:
+  - 网关
+  - mock server
+  - mock gateway
+frida:
+  - frida hook
+  - 动态注入
+  - instrument
+bytecode:
+  - 字节码
+  - python bytecode
+  - co_consts
+sdk:
+  - sdk login
+  - 登录绕过
+  - usingSDKLogin
+dnat:
+  - iptables
+  - nat
+  - 端口重定向
+mumu:
+  - 模拟器
+  - emulator
+  - android
+apk:
+  - android package
+  - 安装包
+  - apktool
+smali:
+  - smali代码
+  - 反编译
+  - dalvik
 
 # 通用术语
 dispatch:
@@ -18,7 +59,7 @@ dispatch:
   - start_tool
 callback:
   - 回调
-  - "19999"   # 必须加引号：YAML 会把纯数字解析成 int，expand_query 的 " ".join() 撞 TypeError
+  - "19999"   # 必须加引号：YAML 会把纯数字解析成 int，expand_query 的 " ".join() 撞 TypeError（2026-07-30 503 事故）
   - report
 search:
   - 检索

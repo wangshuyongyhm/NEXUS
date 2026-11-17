@@ -55,9 +55,9 @@ DOC_READ_MAX_CHARS = 20000   # 每篇最多读 20K 字（覆盖绝大多数 .md�
 CHUNK_SIZE = 1200            # 单块目标字符数
 CHUNK_OVERLAP = 150          # 硬切长段时的重叠
 CHUNK_MAX_PER_DOC = 12       # 每篇最多 12 块（防超长文档爆行）
-# 文档标题/路径黑名单（跳过这些目录）
-SKIP_DIRS = {".smart-env", ".obsidian", "node_modules", ".git", "_retired"}
-# Task611: 密钥真源文件级黑名单（SKIP_DIRS 管不到顶层文件）
+# 目录排除单一真源（task 2611111530）：隐藏目录通配 + 具名清单见 skip_rules
+from nexusos_mem.skip_rules import should_skip as _should_skip_dir
+# Task611: 密钥真源文件级黑名单（目录规则管不到顶层文件）
 SECRET_MD_FILES = {"SECRETS.md"}
 
 
@@ -136,13 +136,13 @@ def embed_knowledge_rows(batch: int = 64) -> dict:
 
 
 def _iter_vault_docs():
-    """遍历 Vault .md 文件（跳过 SKIP_DIRS）。缺 vault 显式报错（1957 废静默占位）。"""
+    """遍历 Vault .md 文件（目录排除走 skip_rules 单一真源）。缺 vault 显式报错（1957 废静默占位）。"""
     if VAULT_ROOT is None:
         from nexusos_common import ConfigError, VAULT_MISSING_REMEDIATION
         raise ConfigError("vault 不可用，无法遍历 Vault 文档。" + VAULT_MISSING_REMEDIATION)
     for path in VAULT_ROOT.rglob("*.md"):
-        # 跳过黑名单目录
-        if any(part in SKIP_DIRS for part in path.parts):
+        # 目录排除：任一目录组件隐藏或具名即跳过（skip_rules 单一真源）
+        if _should_skip_dir(path.parts[:-1]):
             continue
         # Task611: 密钥真源文件级排除
         if path.name in SECRET_MD_FILES:

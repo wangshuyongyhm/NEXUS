@@ -1,0 +1,37 @@
+# state_transition 场景门禁 — LOOP 状态机转换合法性校验（S0-S11）
+# 对应 loop-auto-advance.md §15 LOOP 状态机显式定义
+# Agent 状态转换时调 gate_check(scenario=state_transition, context={from_state, to_state, session_id})
+# ⚠️ 转换矩阵与 loop-auto-advance.md §15.2 Mermaid 同步，改这里必须改文档
+version: 1
+scenario: state_transition
+description: LOOP 状态机转换合法性（25 条合法边，S0-S11）
+required_context:
+  - {name: from_state, desc: "源状态 S0-S11", required: true}
+  - {name: to_state, desc: "目标状态 S0-S11", required: true}
+  - {name: session_id, desc: "LOOP 会话标识", required: true}
+items:
+  - id: ST1
+    name: from/to 是合法状态枚举
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # Task1633(#92): 输入先过语义名别名归一（ANALYZING→S3 等 12 对），S 码原样通过（向后兼容）。
+      # 映射用管道串+dict() 构建——禁 {字面量}（gate_engine str.format 会当占位符解析，见 ST2 头注释）。
+      cmd: 'python3 -c "import sys,re; A=dict(p.split(\"=\") for p in \"IDLE=S0|CLARIFYING=S1|STARTING=S2|ANALYZING=S3|DISPATCHING=S4|WAITING=S5|DECIDING=S6|VALIDATING=S7|PAUSED=S8|RESCUE=S9|COMPLETED=S10|FAILED=S11\".split(\"|\")); f=A.get(sys.argv[1],sys.argv[1]); t=A.get(sys.argv[2],sys.argv[2]); sys.exit(0 if re.match(r\"^S([0-9]|1[01])$\",f) and re.match(r\"^S([0-9]|1[01])$\",t) else 1)" "{from_state}" "{to_state}"'
+      expect_rc: 0
+      timeout: 5
+  - id: ST2
+    name: 转换在 24 条合法边白名单内
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 注意：gate_engine 用 str.format(**context) 替换占位符，Python 集合字面 {...} 会被
+      # format 当字段名解析报错→静默不替换。故用管道分隔字符串 + split() 规避大括号。
+      # cmd 单行（YAML 单引号串里 \n 不会被 shell/python 当换行处理）。
+      # Task538 修复2: 补 S8->S8（PAUSED 二次打断自循环，doc Mermaid :450 有 25 边含此）
+      # Task1633(#92): 边表键也走别名归一（否则语义名过 ST1 死在 ST2），归一化在 cmd 开头做。
+      cmd: 'python3 -c "import sys; A=dict(p.split(\"=\") for p in \"IDLE=S0|CLARIFYING=S1|STARTING=S2|ANALYZING=S3|DISPATCHING=S4|WAITING=S5|DECIDING=S6|VALIDATING=S7|PAUSED=S8|RESCUE=S9|COMPLETED=S10|FAILED=S11\".split(\"|\")); f=A.get(sys.argv[1],sys.argv[1]); t=A.get(sys.argv[2],sys.argv[2]); edges=\"S0->S1|S1->S2|S1->S0|S2->S3|S3->S4|S3->S10|S4->S5|S4->S9|S5->S7|S5->S6|S5->S9|S6->S3|S6->S8|S7->S3|S7->S10|S7->S9|S8->S3|S8->S0|S8->S1|S8->S8|S9->S4|S9->S11|S10->S0|S10->S3|S11->S0\".split(\"|\"); k=f+\"->\"+t; sys.exit(0 if k in edges else 1)" "{from_state}" "{to_state}"'
+      expect_rc: 0
+      timeout: 5

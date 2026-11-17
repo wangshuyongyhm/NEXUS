@@ -1,0 +1,54 @@
+# gate-triggers.yaml — 动作→场景门禁映射(观测层)
+# 观测层扫 xdr 事件流,命中 signal 后查 grace_seconds 内有无对应 gate_check 调用。
+# 无调用 → 告警"漏调"(POST /session/event type=alert)。
+# 不阻断,只告警(发现机制,不是强制机制)。
+version: 1
+triggers:
+  - signal: callback_done          # POST /callback status=done
+    scenario: done
+    auto_triggered: true           # 已在 /callback 内联触发(服务端自动),不需 Agent 主动调
+    grace_seconds: 0               # auto_triggered=true 时跳过观测(不会漏调)
+
+  - signal: session_register       # POST /session/register
+    scenario: init
+    auto_triggered: false          # 靠 Agent 主动调 gate_check(scenario=init)
+    grace_seconds: 300             # 注册后 5min 内应调 init gate
+
+  - signal: dispatch_sent          # POST /dispatch
+    scenario: dispatch
+    auto_triggered: false
+    grace_seconds: 60              # 派任务前应先过 gate
+
+  - signal: persist_commit         # 检测到 03-Daily 的 git commit(会话日志落盘)
+    scenario: persist
+    auto_triggered: false
+    grace_seconds: 600             # 落盘 commit 前/后 10min 内应过 gate
+
+  - signal: code_commit            # 检测到代码 git commit
+    scenario: code
+    auto_triggered: false
+    grace_seconds: 60              # 代码 commit 前应先过 gate
+
+  - signal: loop_start             # LOOP 全力以赴模式启动
+    scenario: loop_start
+    auto_triggered: false          # Agent 主动调 gate_check(scenario=loop_start)
+    grace_seconds: 60              # LOOP 启动前应过 gate
+
+  - signal: loop_complete          # LOOP 全自动模式退出
+    scenario: loop_complete
+    auto_triggered: false          # Agent 主动调 gate_check(scenario=loop_complete)
+    grace_seconds: 60              # LOOP 退出前应过 gate
+
+  - signal: state_transition       # LOOP 状态机转换(S0→S1→...→S11)
+    scenario: state_transition
+    auto_triggered: false          # Agent 主动调 gate_check(scenario=state_transition)
+    grace_seconds: 60              # 状态推进前应过 gate
+
+  # Task651 池#81（641 方案 C）：发待决/画像代决前应过 user_decision gate。
+  # 只告警不阻断起步（641 定稿防瘫验收）。观测器识别规则（need_decision/
+  # need_coord 事件→signal）属 monitor 侧后续单——未补识别前 match_signal
+  # 返回 False，本条只统计不误报（零破坏挂载）。
+  - signal: pending_decision       # 事件流出现 need_decision/need_coord/待决
+    scenario: user_decision
+    auto_triggered: false
+    grace_seconds: 60              # 发待决前应先过画像代决 gate

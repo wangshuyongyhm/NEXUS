@@ -27,15 +27,43 @@ _OUTPUT_SIGNATURE = re.compile(
 )
 
 
+# 验证等级关键词（词表不变——只加"否定语境"判据，不动词面，避免 D10 式词法误拦）
+_LEVEL_PATTERNS = (
+    ("L3", re.compile(r"level\s*3|\bl3\b|端到端|场景验证|真实场景|\be2e\b", re.IGNORECASE)),
+    ("L2", re.compile(r"level\s*2|\bl2\b|函数测试|函数签名|import.*验证|inspect", re.IGNORECASE)),
+    ("L1", re.compile(r"level\s*1|\bl1\b|py_compile|语法检查|\bpyc\b", re.IGNORECASE)),
+)
+
+# 池 #826①：否定/让步框架标记——与等级字样**邻近**（±_NEG_WINDOW 字符内）出现时，
+# 该次命中不算"声明完成度"，不触发索证。选邻近窗口而不是整句黑名单，是因为
+# 「L3 验证通过（缺口另见遗留）」这类句子里真声明与如实缺口并存，整句黑名单会误放。
+_NEGATION_MARKERS = (
+    "缺口", "未验证", "未完成", "未做", "未覆盖", "未测", "未跑", "未能", "未达",
+    "不可达", "不适用", "无法", "不足", "待补", "尚未", "没有", "不算", "不构成",
+    "缺证", "如实", "不冒充", "不能算", "非l3", "非 l3", "非l2", "非 l2",
+)
+_NEG_WINDOW = 12
+
+
+def _negated(text: str, start: int, end: int) -> bool:
+    """命中点邻近窗口内是否含否定/让步标记（池 #826① 否定语境判据）。"""
+    lo = max(0, start - _NEG_WINDOW)
+    hi = min(len(text), end + _NEG_WINDOW)
+    window = text[lo:hi].lower()
+    return any(marker in window for marker in _NEGATION_MARKERS)
+
+
 def _detect_level(summary: str, report_text: str) -> str:
-    """从 summary/report 检测声明的验证等级。"""
-    combined = ((summary or "") + " " + (report_text or "")).lower()
-    if re.search(r'level\s*3|l3|端到端|场景验证|真实场景|e2e', combined):
-        return "L3"
-    if re.search(r'level\s*2|l2|函数测试|函数签名|import.*验证|inspect', combined):
-        return "L2"
-    if re.search(r'level\s*1|l1|py_compile|语法检查|pyc', combined):
-        return "L1"
+    """从 summary/report 检测**声明性**验证等级。
+
+    池 #826①：只看"是否存在该等级的非否定命中"——「L3 缺口（如实）」「L3 未验证」
+    这类如实声明不得被当成 L3 完成索证（1735 实证误拦）。
+    """
+    combined = (summary or "") + "\n" + (report_text or "")
+    for level, pattern in _LEVEL_PATTERNS:
+        for match in pattern.finditer(combined):
+            if not _negated(combined, match.start(), match.end()):
+                return level
     return "unknown"
 
 

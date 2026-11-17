@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 # 工作区根：1959 单3 起不再 parents[N] 推导（audit §1 行13），发现策略单源
-# _workspace_root（显式 > env NEXUS_ROOT 布局探测 > git root > None）。
+# _workspace_root（显式 > env NEXUS_VAULT_ROOT 布局探测 > git root > None）。
 try:
     import _workspace_root
 except ImportError:

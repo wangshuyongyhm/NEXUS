@@ -1,0 +1,137 @@
+# init 场景门禁 — 新会话注册后检查(POST /session/register 后)
+# 对应设计 §3.2 I1-I4。保证 Agent 上线即合规:注册到位/服务活/脚本全/能力齐。
+version: 1
+scenario: init
+description: 新会话注册门禁(保证 Agent 上线即合规)
+required_context:
+  - {name: agent, desc: "Agent 名", required: true}
+  - {name: role, desc: "角色(dispatcher/worker)", required: true}
+  - {name: session_id, desc: "会话 ID", required: true}
+items:
+  # I1: PRESENCE 注册到位(硬)——看 /session/active 能否找到自己
+  - id: I1
+    name: PRESENCE 注册到位
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 优先用 context 的 presence_url,fallback 到默认本地端口
+      # 注意:${{ }} 双花括号是给引擎 str.format 的转义,渲染后为 shell 的 ${PRESENCE_URL:-...}
+      # (单层 ${} 会被 .format 当占位符→KeyError→整串不渲染→{agent} 失效,2026-07-29 kimi 修复)
+      cmd: 'curl -sf "${{PRESENCE_URL:-http://127.0.0.1:19998}}/session/active" 2>&1 | grep -q "{agent}"'
+      expect_rc: 0
+      timeout: 10
+
+  # I2: 五服务 alive(硬)——nexus 五服务都要健康
+  - id: I2
+    name: 六服务 alive
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 六端口(Task1951 G5 对齐 quickref 1A-4 口径):embed/ocrx/api/xdr/gateway/console。
+      # 19900=nexus-console(实测 /health 返回 ok)。SERVICES_URLS 可覆盖(空格分隔)。
+      cmd: >
+        for u in ${SERVICES_URLS:-http://127.0.0.1:11436/health http://127.0.0.1:11438/health http://127.0.0.1:11537/health http://127.0.0.1:19998/health http://127.0.0.1:4001/health http://127.0.0.1:19900/health}; do
+          curl -sf "$u" >/dev/null 2>&1 || { echo "FAIL: $u"; exit 1; };
+        done; echo "6/6 alive"
+      expect_rc: 0
+      timeout: 20
+
+  # I3: 脚本完整性(硬)——integrity-check rc=0 通过(rc=2=有问题)
+  - id: I3
+    name: 脚本完整性
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 注意:${{ }} 双花括号转义给 str.format(同 I1,2026-07-29 kimi/zcode 修复)
+      # 绝对路径:gate 在 Vault根执行,相对 ./ 找不到脚本(zcode 补修)
+      # shell 逻辑:rc=0 或 rc=1 都算通过(integrity-check exit 0=全过/1=WARNING 不阻塞/2=ERROR 硬拦)
+      #  用 case 精确判断,避免 || && 优先级陷阱(原版 rc=2 时误 exit=1)
+      #  2026-08-19 kimi 修复:原版 0|2 通过系语义颠倒(exit 2=ERROR 瘫痪风险却放行,1=WARNING 反被 REJECT)
+      cmd: 'python3 "${{NEXUS_INTEGRITY_SCRIPT:-{vault_root}/05-System/自动化脚本/nexus-integrity-check.py}}" 2>&1 | tail -2; case ${{PIPESTATUS[0]}} in 0|1) exit 0;; *) exit 1;; esac'
+      expect_rc: 0
+      timeout: 30
+
+  # I4: 能力自检(软)——6 能力文件 × 5 关键词 grep 命中
+  - id: I4
+    name: 能力自检
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 检查能力目录有≥6 个 .md 文件,且关键词命中≥5(grep -rl 数)
+      # 08201651 修:原 `|| { ...; }` 花括号组在 folded 标量折行后被 str.format
+      # 当占位符→KeyError→整串回退→{vault_root} 不解析(shell bad substitution)。
+      # 改 if/then 等价形态(零花括号),语义不变。
+      cmd: >
+        dir="${{NEXUS_CAPABILITY_DIR:-{vault_root}/05-System/NEXUS-CONSTRAINT}}";
+        if [ ! -d "$dir" ]; then echo "能力目录不存在: $dir"; exit 1; fi;
+        files=$(find "$dir" -maxdepth 2 -name "*.md" | wc -l | tr -d ' ');
+        kw=$(grep -rEoh "工具|流程|约束|示例|边界" "$dir" 2>/dev/null | sort -u | wc -l | tr -d ' ');
+        if [ "$files" -ge 6 ] && [ "$kw" -ge 5 ]; then echo "files=$files kw=$kw"; else echo "files=$files kw=$kw (要求≥6/≥5)"; exit 1; fi
+      expect_rc: 0
+      timeout: 15
+
+  # I5: launchd 服务全注册(软)——Task418 自动注册的双保险
+  # 2026-08-03 会话08031120: scheduler 未注册致 ValueError(Bug11同类复发)。
+  # Task418 已实现模块加载时自动注册,本项是检测层:自动注册失败时告警。
+  # 校验: launchctl list 的 ai.nexus.* 服务名是否都在 AGENT_REGISTRY
+  - id: I5
+    name: launchd 服务全注册
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 用独立校验脚本(避免 inline python 引号嵌套问题)
+      # 脚本在 gates/ 下而非 _checks/(后者是 gate 插件目录会被自动扫描)
+      cmd: 'python3 "${{NEXUS_GATES_DIR:-{vault_root}/05-System/自动化脚本/nexusos_xdr/etc/gates}}/launchd_registry_verify.py"'
+      expect_rc: 0
+      timeout: 15
+
+  # I6: Agent 版本同步(硬)——check_agent_versions.sh 检测版本变化
+  - id: I6
+    name: Agent 版本同步
+    auto: true
+    severity: REJECT
+    check:
+      type: agent_version_synced
+
+  # I7: 记忆自检探针(软)——Task1401-D6F 机器化(cull-list D 类: init.md §2 自觉项)
+  # 机器锚语义: init.md §2 要求 Agent 写 verification 探针并软废弃——本项把
+  # "文档希望 Agent 做"变成"gate 一定会查"。severity=WARN 非 REJECT 的原因:
+  # register 时点早于 §2 记忆自检步骤(时序倒挂),REJECT 会拦死每日首个会话;
+  # WARN 留痕告警已足以支撑单 G 裁剪文档(机器接住=有检查,非必须硬拦)。
+  # 判据: PG nexus_mem.knowledge 当日该 agent 有 title LIKE 'verification%'
+  # 且 deprecated=TRUE 的行(写了且已软废弃=自检完成闭环)。
+  - id: I7
+    name: 记忆自检探针
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # psql 单查+LIMIT 1+5s 超时(陷阱4:防拖 init gate);agent 参数化(context 注入)
+      # PGHOST/PGUSER 默认本机;title 前缀判据来自任务书关键常量
+      cmd: >
+        count=$(psql -qtAX -h ${{PGHOST:-localhost}} -d nexus_mem -U wang -c
+        "SELECT count(*) FROM knowledge WHERE source_agent='{agent}' AND created >= CURRENT_DATE AND title LIKE 'verification%' AND deprecated = TRUE" 2>/dev/null);
+        count=${{count:-0}};
+        if [ "$count" -ge 1 ] 2>/dev/null; then
+          echo "agent={agent} 当日 verification 探针已写且软废弃(count=$count)";
+        else
+          echo "agent={agent} 当日无 verification 探针(记忆自检未做或未废弃) count=$count";
+          exit 1;
+        fi
+      expect_rc: 0
+      timeout: 8
+
+  # I8: 外接盘依赖 gate(Task1951 G4=清单 I1)——挂载判定+关键路径可写探针。
+  # 路径清单全部数据文件化 etc/gates/data/external-disk-paths.yaml(PG 备份+relocate
+  # 记录路径+池锁本地盘);数据文件缺失=fail-open WARN(未配置场景不 REJECT)。
+  - id: I8
+    name: 外接盘依赖
+    auto: true
+    severity: REJECT
+    check:
+      type: external_disk_ready

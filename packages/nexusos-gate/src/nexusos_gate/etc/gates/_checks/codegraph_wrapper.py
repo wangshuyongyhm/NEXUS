@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 # codegraph 项目根：1959 单3 起不再 parents[N] 推导（安装形状假设，audit §1 行13），
-# 发现策略单源 _workspace_root（显式参数 > NEXUS_CODEGRAPH_PROJECT > NEXUS_ROOT
+# 发现策略单源 _workspace_root（显式参数 > NEXUS_CODEGRAPH_PROJECT > NEXUS_VAULT_ROOT
 # 布局探测 > git repo root > None→fail-open []）。
 try:
     import _workspace_root

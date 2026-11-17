@@ -882,6 +882,29 @@ def pgvector_search(
 # PostgreSQL FTS + ILIKE 搜索（task 245 后为降级路径，保留）
 # ---------------------------------------------------------------------------
 
+# 2611111772 F2：词元 OR tsquery 构造——白名单消毒 + 去重保序 + 上限截断。
+# 白名单含 CJK 基本/扩展A + 假名 + 字母数字-_；' 引号形态由拼接侧控制，
+# 正则已排除 ' 与全部 tsquery 操作符字符，无注入面。
+_TSQ_TOKEN_RE = re.compile(r"[0-9A-Za-z_\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF-]+")
+_TSQ_MAX_TOKENS = 8  # 1755 实测查询词元 2-7 为主；截断防超长查询拖慢 FTS
+
+
+def _or_tsquery_parts(tokenized: str) -> List[str]:
+    """消毒后的去重词元列表（小写保序，截断 _TSQ_MAX_TOKENS）。"""
+    seen = set()
+    uniq = []
+    for t in _TSQ_TOKEN_RE.findall(tokenized or ""):
+        low = t.lower()
+        if low not in seen:
+            seen.add(low)
+            uniq.append(low)
+    return uniq[:_TSQ_MAX_TOKENS]
+
+
+def _or_tsquery(tokenized: str) -> str:
+    """词元 OR 拼接的 to_tsquery 字面量；无合法词元返回 ''（调用侧退回 AND）。"""
+    return " | ".join(f"'{t}'" for t in _or_tsquery_parts(tokenized))
+
 def pg_fts_search(
     conn,
     query: str,
@@ -918,11 +941,26 @@ def pg_fts_search(
     from nexusos_mem.tokenize_zh import jieba_enabled as _fts_jieba_on, tokenize_for_query as _tok_query
     if _fts_jieba_on():
         fts_query = _tok_query(query)
-        fts_condition = ("(search_vector_zh @@ plainto_tsquery('simple', %s)"
-                         " OR search_vector @@ plainto_tsquery('simple', %s))")
-        rank_fts = ("ts_rank(search_vector_zh, plainto_tsquery('simple', %s)),"
-                    " ts_rank(search_vector, plainto_tsquery('simple', %s))")
-        fts_params = [fts_query, fts_query]
+        # 2611111772 F2（1755 诊断 ★★★）：plainto_tsquery 是 AND 语义——
+        # 2-7 词元须同行全中，中文实测 0-1 行候选=零召回主因。改词元 OR
+        # 拼接（to_tsquery 引号形态）：任一词元命中即入候选，多词元命中自然
+        # 拿更高 ts_rank；噪声由 ORDER BY rank + rerank 吸收（量化见基准
+        # 2611111772 report）。消毒=白名单剥离 tsquery 语法字符（防查询文本
+        # 注入 &|!():' 操作符）；无合法词元退回旧 AND 形态（退化查询兜底）。
+        # flag off 路径不动——双轨回滚生命线保持逐字节旧 SQL。
+        _tsq = _or_tsquery(fts_query)
+        if _tsq:
+            fts_condition = ("(search_vector_zh @@ to_tsquery('simple', %s)"
+                             " OR search_vector @@ to_tsquery('simple', %s))")
+            rank_fts = ("ts_rank(search_vector_zh, to_tsquery('simple', %s)),"
+                        " ts_rank(search_vector, to_tsquery('simple', %s))")
+            fts_params = [_tsq, _tsq]
+        else:
+            fts_condition = ("(search_vector_zh @@ plainto_tsquery('simple', %s)"
+                             " OR search_vector @@ plainto_tsquery('simple', %s))")
+            rank_fts = ("ts_rank(search_vector_zh, plainto_tsquery('simple', %s)),"
+                        " ts_rank(search_vector, plainto_tsquery('simple', %s))")
+            fts_params = [fts_query, fts_query]
     else:
         fts_query = query
         fts_condition = "search_vector @@ plainto_tsquery('simple', %s)"
@@ -954,6 +992,23 @@ def pg_fts_search(
 
     # task 253 修复: 旧版 DISTINCT ON (id)+ORDER BY id 让 LIMIT 取的是"id 最小"
     # 而非"rank 最高"的行（id 本身是主键，DISTINCT ON 纯属多余）。
+    #
+    # 2611111772 F2 阶梯（首轮基准实证后加）：纯 OR 候选洪泛——单 token 命中行
+    # 与多 token 命中行在 rank 上不可分（ts_rank 0.03-0.1 全被 core 0.15 垫平），
+    # `id DESC` 平局裁决让最新行灌满 top5（首轮 AFTER 实测 hit 0.280→0.040）。
+    # 软阈值=词元命中数 ladder：tok_hits 高者先排（多 token 命中=更强相关信号），
+    # 不做硬过滤（保 OR 召回——online 臂 recall +0.058 的收益来源）；单 token
+    # 查询 ladder 退化恒 0/1，等价旧排序。词元内联字面量（白名单已消毒无引号）。
+    _tok_ladder = ""
+    _order_head = "rank DESC"
+    if _fts_jieba_on() and _tsq:
+        _parts = _or_tsquery_parts(fts_query)
+        if len(_parts) >= 2:
+            _hits = [f"(CASE WHEN search_vector_zh @@ to_tsquery('simple', '{t}')"
+                     f" OR search_vector @@ to_tsquery('simple', '{t}') THEN 1 ELSE 0 END)"
+                     for t in _parts]
+            _tok_ladder = ",\n               (" + " + ".join(_hits) + ") AS tok_hits"
+            _order_head = "tok_hits DESC, rank DESC"
     sql = f"""
         SELECT id, title, content, source_agent, tags, project, task_id,
                knowledge_type, shadow_code, confidence, created, path,
@@ -963,11 +1018,11 @@ def pg_fts_search(
                     CASE WHEN title ILIKE %s OR content ILIKE %s THEN 0.5 ELSE 0 END,
                     CASE WHEN knowledge_type IN ('experience','finding','decision','pitfall')
                          THEN 0.15 ELSE 0 END
-                ) AS rank
+                ) AS rank{_tok_ladder}
         FROM knowledge
         WHERE ({fts_condition} OR {ilike_condition})
           {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}
-        ORDER BY rank DESC, id DESC
+        ORDER BY {_order_head}, id DESC
         LIMIT %s OFFSET %s
     """
     # 参数序：GREATEST（rank_fts 1-2 个 + ILIKE 2 个）→ WHERE（fts_condition 1-2 个 + ILIKE 2 个）

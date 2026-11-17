@@ -1,0 +1,304 @@
+# persist 场景门禁 — 落盘时检查(用户说"落盘"后)
+# 对应设计 §3.2 P1-P5 + §3.3 P4 README 同步专章。本次教训的核心固化。
+version: 1
+scenario: persist
+description: 落盘门禁(会话日志/资产/README 同步/broadcast 登出提醒)
+required_context:
+  - {name: date, desc: "日期 YYYY-MM-DD", required: true}
+  - {name: session_log_path, desc: "会话日志路径", required: true}
+  - {name: touched_dirs, desc: "本次动过的目录列表", required: true}
+  - {name: output_dir, desc: "产出目录(五层资产根)", required: true}
+items:
+  # P1: 会话日志存在(硬)——落盘前提是日志已写
+  - id: P1
+    name: 会话日志存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{session_log_path}"
+
+  # P2: MEM 经验(软)——查近期相关经验避免重复踩坑
+  - id: P2
+    name: MEM 经验
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 查 MEM 近期经验(无 MEM 服务时记 warn 不阻塞 — severity WARN)
+      # Task1539 提速: 探活端点 /search→/health（/search?q=recent 实测挂死 15s 超时 rc=28，
+      # /health 0.03s）+ 显式 -m 3（原 timeout 10 是唯一兜底，慢端点拖满 10s）
+      cmd: >
+        url="${MEM_URL:-http://127.0.0.1:11537}";
+        if curl -sf -m 3 "$url/health" >/dev/null 2>&1; then
+          echo "MEM 可达";
+        else
+          echo "MEM 不可达($url)— 跳过经验查询";
+          exit 1;
+        fi
+      expect_rc: 0
+      timeout: 5
+
+  # P3: 五层资产验证(2026-07-30 D3-9 修复：原只查output非空，现拆分查关键层)
+  # ① 输出层 report.md(硬REJECT)——落盘的核心产出
+  - id: P3
+    name: output/report.md 存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{output_dir}/report.md"
+
+  # ② 过程层 full-log.md(硬REJECT)——pipe-pane 自动记录，没有=过程未记录
+  - id: P3b
+    name: process/full-log.md 存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{output_dir}/../process/full-log.md"
+
+  # ③ 输入层 task.md(硬REJECT)——任务书，没有=无追溯
+  - id: P3c
+    name: input/task.md 存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{output_dir}/../input/task.md"
+
+  # ④ 数据层 files/(软WARN)——不可再生产出，部分任务无独立文件
+  - id: P3d
+    name: output/files/ 有产出
+    auto: true
+    severity: WARN
+    check:
+      type: file_exists
+      path_glob: "{output_dir}/files/*"
+
+  # ⑤ 否定层 negative-results.md(软WARN)——排除方案记录，非所有任务都有
+  - id: P3e
+    name: negative-results.md 存在
+    auto: true
+    severity: WARN
+    check:
+      type: file_exists
+      path: "{output_dir}/negative-results.md"
+
+  # P4: README 同步(硬,2026-10-23 Task1879 升 REJECT)——动过的目录 README 要同步 updated/file_count
+  # 升级前提:存量 67 项失配已由 task/1877 清零 + 检查器误报场景已修（无 README 跳过/多口径容差）
+  - id: P4
+    name: README 同步
+    auto: true
+    severity: REJECT
+    check:
+      type: readme_synced
+      dirs: "{touched_dirs}"
+      date: "{date}"
+
+  # P5: broadcast 登出(软)——manual:落盘后通知 broadcast 登出
+  - id: P5
+    name: broadcast 登出
+    auto: false
+    severity: WARN
+    reminder: |
+      [manual] 落盘后必做:
+      1. 向 broadcast 频道通报本次落盘(会话 ID + 主要产出)
+      2. 在 PRESENCE 登出本会话: POST /session/event(type=done 推摘要) + 15min 自动清理注销(C4 修复: 原 /session/logout 端点不存在)
+      3. 若有跨 Agent 协作,通知相关方
+
+  # P6: 未决问题整理(软,2026-08-03 新增)——未决问题写入独立文件供跨会话追踪
+  # 痛点:用户反馈 LLM 正文表述的问题散落易漏看。解决:落盘时强制整理未决问题到独立文件
+  # WARN 不阻塞:纯文档任务可能无未决问题,文件不存在记 WARN 不阻断落盘
+  - id: P6
+    name: 未决问题整理
+    auto: true
+    severity: WARN
+    check:
+      type: file_exists
+      path: "03-Daily/{date}/未决问题.md"
+
+
+  # P7: 会话日志已更新(REJECT)——不只存在,必须本次会话更新过(08110853漏项固化)
+  - id: P7
+    name: 会话日志已更新
+    auto: true
+    severity: REJECT
+    check:
+      type: session_log_updated
+      path: "{session_log_path}"
+      session_id: "{session_id}"
+      session_start_ts: "{session_start_ts}"
+
+  # P8: 外部配置变更留痕(REJECT)——改Vault外文件需在Vault内留记录
+  - id: P8
+    name: 外部配置变更留痕
+    auto: true
+    severity: REJECT
+    check:
+      type: external_change_traced
+      external_changes: "{external_changes}"
+      session_log_path: "{session_log_path}"
+      report_path: "{output_dir}/report.md"
+      committed_files: "{committed_files}"
+
+  # P9: 验证等级标注(WARN)——报完成必须有验证等级
+  - id: P9
+    name: 验证等级标注
+    auto: true
+    severity: WARN
+    check:
+      type: verification_level_marked
+      report_path: "{output_dir}/report.md"
+      commit_msg: "{commit_msg}"
+
+  # P10: Agent档案updated兜底(WARN)——动过Agent目录需更档案updated字段
+  - id: P10
+    name: Agent 档案 updated
+    auto: true
+    severity: WARN
+    check:
+      type: agent_archive_updated
+      dirs: "{touched_dirs}"
+      date: "{date}"
+
+  # P11: 断链趋势未暴增(WARN)——避免断链累积几个会话才发现(MEM#46758)
+  # Task1539 提速: source_exclude_dirs(机器域源侧排除,1523 vault-domains.yaml 口径)——
+  # 机器产物 wikilink 反映快照时点非可维护断链信号(Task1299 修法A 泛化);
+  # 跳过其内容读取(实测 416 文件场景 P11 11.3s 的 IO 大头)。语义=聚焦人工域断链趋势。
+  - id: P11
+    name: 断链趋势未暴增
+    auto: true
+    severity: WARN
+    check:
+      type: vault_broken_trend
+      baseline_path: "05-System/自动化脚本/vault-health.json"
+      max_increase: 30
+      vault_root: "{vault_root}"
+      exclude_dirs: "05-System/NEXUS-MEM/coord-traces"
+      cache_ttl_s: 1800   # Task1539: 30min 复用窗（会话内重复 persist 不重扫全库；0=关闭）
+      source_exclude_dirs:
+        - "05-System/NEXUS-MEM"
+        - "06-Memory/MEM镜像"
+        - "06-Memory/MEM图谱"
+        - "task"
+        - "output"
+        - "process"
+        - "nexus-wt*"
+        - "nexus-wt*/**"
+        - "99-Archive"
+        - "archive-deprecated"
+        - "05-System/backups"
+
+  # P12: 工作区未提交 .py(WARN,2026-08-19 Task577)——文档层 commit 通过≠代码落库(A.3③)
+  # WARN 不 REJECT 是刻意设计:在途代码任务工作区常含 .py,REJECT 会误伤;报出即提醒
+  - id: P12
+    name: 工作区无未提交 .py
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cwd: "{vault_root}"
+      cmd: >
+        files=$(git status --porcelain -- '*.py' | head -5);
+        test -z "$files" && exit 0;
+        echo "代码未落库(工作区有未提交 .py): $files" >&2; exit 1
+      expect_rc: 0
+      timeout: 15
+
+  # P13: 工作区残量(WARN,2026-08-29 Task901)——commit 后无白名单外残量
+  # (#64742 08271547 落盘缺口:touched 暂存漏收 33 任务,根因无 commit 后残量检查)
+  # WARN 不 REJECT 是刻意设计:残量有合法场景(运行时产物入白名单可配置);报出即提醒 commit 范围漏收
+  # 白名单=运行时产物(LOOP checkpoint / vault-health.json(P11 基线) / 06-Memory/index.md(占用率自愈))
+  # Task1539 增补(语义修正,非降级): task/ 全域——合法任务产出;多 Agent 并发时他 Agent 的
+  # task/ 目录恒在 git status 里,报成"我的残量"是误报(任务书§1.5:task/ 本不该被当遗留)。
+  # task 产出完整性由 G14 任务子图连通(done gate)把守,残量防线不因白名单失守。
+  - id: P13
+    name: 工作区残量(白名单外)
+    auto: true
+    severity: WARN
+    check:
+      type: workspace_residue
+      cwd: "{vault_root}"
+      whitelist:
+        - "task/"
+        - "05-System/自动化脚本/vault-health.json"
+        - "06-Memory/index.md"
+
+  # P14: 池行闭环一致性(池#48, 2026-08-31)——task 已 complete 但引用的池行未翻闭环
+  # 治池漂移(08311900 实证 6 行滞留 11-12 天险些派重复单):翻行原只靠 persist 清单#17 自觉,本项机器拦
+  # WARN 不 REJECT 是刻意设计:#46 半闭环留观察口径/多会话接力翻行是合法场景,REJECT 会误伤;报出即提醒(同 P11-P13 先例)
+  - id: P14
+    name: 池行闭环一致性
+    auto: true
+    severity: WARN
+    check:
+      type: pool_rows_flipped
+      dirs: "{touched_dirs}"
+      pool_path: "06-Memory/未决问题池.md"
+      vault_root: "{vault_root}"
+
+  # P15: 今日改动 .md 的 updated 字段(WARN,2026-09-01 Task980)——落盘清单瘦身配套,原人工#11转自动
+  # 只警今日 mtime 且 frontmatter 含 updated 的文件:存量旧日期海量,REJECT 会拦死所有落盘(任务书已排除)
+  - id: P15
+    name: 今日改动 .md 的 updated 已同步
+    auto: true
+    severity: WARN
+    check:
+      type: md_updated_today
+      dirs: "{touched_dirs}"
+      date: "{date}"
+      vault_root: "{vault_root}"
+
+  # P16: 未决池闭环行阈值(WARN,2026-09-01 Task1000)——治理二期配套。09011544
+  # 手术(404→214)后残留闭环行是"该搬未搬"存量信号,>30 提醒搬 archive(池头部
+  # 规则机器化——治"规则存在≠执行")。口径=表格行内闭环标记三形态(✅/[x]/闭环[x]);
+  # 文件缺失 skip(pass+note——池结构变动时不应拦落盘)。
+  # cmd 体零花括号(str.format 陷阱,996/987 惯例):if/fi 替代 {} 组
+  - id: P16
+    name: 未决池闭环行≤30
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cwd: "{vault_root}"
+      cmd: >
+        f="06-Memory/未决问题池.md";
+        if [ ! -f "$f" ]; then echo "skip:池文件缺失(结构变动不拦落盘)" >&2; exit 0; fi;
+        n=$(grep -cE '^\|.*(✅.*闭环|\[x\].*闭环|闭环.*\[x\])' "$f");
+        if [ "$n" -le 30 ]; then echo "闭环行 $n 条(≤30 正常)" >&2; exit 0; fi;
+        echo "闭环标记行 $n 条>30——搬 未决问题池-archive.md(09011544 手术规则,active 视图配套)" >&2; exit 1
+      expect_rc: 0
+      timeout: 10
+
+  # P17: DONE 任务 ack 覆盖(Task 1384，用户定向 0917)——落盘时窗口 24h 内
+  # 存在 DONE 且未 ack 的任务 → WARN 提醒补 ack(D9 的落盘侧配套；REJECT 在
+  # dispatch 侧)。插件 done_ack 直接 import task_state，不可达 fail-open。
+  - id: P17
+    name: DONE 任务 ack 覆盖
+    auto: true
+    severity: WARN
+    check:
+      type: done_ack
+      window_hours: 24
+
+  # P18: 主控套用经验 outcome 回填检查(Task1951 G3=清单 P4)——当日 apply_attempt
+  # vs 非 pending apply_outcome 配对(detail.apply_attempt_id)，未回填>0 → WARN。
+  # 首期 WARN 观察一周(#464 裁定:回填链路刚建,误伤面未知,不直接 REJECT)。
+  - id: P18
+    name: outcome 回填（当日套用配对）
+    auto: true
+    severity: WARN
+    check:
+      type: outcome_backfill
+
+  # P19: 池写入走封装检查(Task1951 G2=清单 P3)——池 mtime 今日但 ~/.pool-write.log
+  # 无当日写痕 → WARN(未走 pool-safe-write.sh,并发互吞风险 池#102)。
+  # 任务书原建议挂 P14;P14 已有专属语义(池行闭环)故独立 P19(单一职责)。
+  - id: P19
+    name: 池写入走封装
+    auto: true
+    severity: WARN
+    check:
+      type: pool_write_via_wrapper
+      vault_root: "{vault_root}"

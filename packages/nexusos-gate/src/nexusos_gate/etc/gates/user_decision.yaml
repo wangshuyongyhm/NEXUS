@@ -1,0 +1,34 @@
+# user_decision 场景门禁 — 画像代决机械层（641 方案 C，Task651，池 #81）
+# 三层融合之 GATE 强制层：MEM 数据层（user_profile，652 打标）+ 本层 + preferences §16 入口层。
+# 起步策略（641 定稿）：U1 REJECT / U2 WARN——只告警不阻断代决，防瘫验收。
+version: 1
+scenario: user_decision
+description: 发待决/画像代决前门禁(查过画像 + 风险分级)
+required_context:
+  - {name: agent, desc: "决策 Agent 名(画像查询归属)", required: true}
+  - {name: risk_level, desc: "风险等级(low_reversible/high_irreversible)", required: false}
+items:
+  # U1: 决策前必须查过画像(硬)——agent_activity 画像 search 记录
+  - id: U1
+    name: 画像已查询
+    auto: true
+    severity: REJECT
+    check:
+      type: profile_queried
+      agent_field: agent
+
+  # U2: 代决风险分级(软)——risk_level=low_reversible 才许画像代决；
+  # 缺失/高风险 → WARN 提醒走真人。
+  # 注：任务书原文写 field_check，但 field_check 插件仅支持长度校验无枚举语义
+  # （值限 low_reversible 不可表达），改用通用 command 插件承载枚举（零新文件，
+  # 保 4-file diff；L3 验收语义不变）。Task651。
+  - id: U2
+    name: 代决风险分级
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      # 缺失时 _resolve_level 整串保留原样（KeyError→原串），detail 显示占位符
+      # 『{risk_level}』即"未提供"（format 体系内字面量区分不可行，语义不受影响）
+      cmd: 'case "{risk_level}" in low_reversible) exit 0;; *) echo "risk_level=『{risk_level}』——仅 low_reversible 许代决，高风险走真人" >&2; exit 1;; esac'
+      timeout: 5

@@ -1,0 +1,68 @@
+# ==============================================================================
+# config.example.yaml — nexusos-xdr agents 运行面配置样例（脱敏模板）
+# ==============================================================================
+# 本文件是「工具体系配置」的结构模板，供无 Hermes 环境的开源用户自建
+# `~/.hermes/tools.yaml`（agents/ 子包的唯一读取位置）。
+# 零真实值：所有条目为占位示例，字段含义见注释。
+#
+# 用途：Agent 适配器（send_task / 弹窗救援 / busy 检测）按本配置注册的工具
+# 清单实例化。新增一个工具只需在 `tools:` 段加一条目，无需改源码。
+#
+# 接入三步：
+#   1. 复制本文件为 ~/.hermes/tools.yaml，按需增删 tools: 段条目
+#   2. 启动工具会话：~/.hermes/scripts/start_tool.sh start <session>
+#   3. 创建该工具的本地 AGENTS.md（Agent 规则源）
+#
+# 字段说明：
+#   display_name        : 显示名（用于日志/仪表盘）
+#   tmux_session        : tmux session 名（必须匹配实际 session）
+#   type                : 工具类型（任意字符串，适配器按它路由）
+#   agentic             : 是否 LLM 驱动（影响是否需要弹窗救援）
+#   capabilities        : 能力清单（[bash, curl, file_io, ...]）
+#   config_files        : 该工具的配置文件路径（同步规则用）
+#   extends             : 继承另一个工具的全部字段（避免重复）
+#   overrides           : 覆盖 extends 的字段
+#   popup_detection     : TUI 弹窗检测配置
+#     enabled           : 是否扫弹窗（不弹窗的工具设 false）
+#     keywords          : 弹窗关键词（精确句式，避免单词匹配误判）
+#   rescue_keys         : 救援键序（默认 Right Right Enter）
+#   cooldown_seconds    : 同一工具两次救援的最小间隔（防抖）
+# ==============================================================================
+
+# 默认值（所有工具未显式声明时使用）
+defaults:
+  popup_detection:
+    scan_non_empty_tail: 10           # 扫描尾部 N 个非空行
+    cooldown_seconds: 5               # 救援防抖（秒）
+  rescue_keys: ["Right", "Right", "Enter"]
+  callbacks:
+    on_block: 'curl -s -X POST 127.0.0.1:19999/rescue -H "Content-Type: application/json" -d "{\"source\":\"{tool}\",\"session\":\"{session}\",\"task_id\":\"{task_id}\"}"'
+  capabilities: [bash]
+
+# ==============================================================================
+# 工具清单（示例：一个完整条目 + 一个 extends 条目）
+# ==============================================================================
+tools:
+
+  # ------------------------------------------------------------ 完整条目范例
+  my-agent:
+    display_name: My Agent
+    tmux_session: my-agent
+    type: my-cli
+    agentic: true
+    capabilities: [bash, curl, file_io]
+    config_files:
+      - ~/.config/my-agent/AGENTS.md
+    popup_detection:
+      enabled: true
+      keywords:
+        - "do you want to allow"        # 按你的工具 TUI 弹窗实际句式替换
+    rescue_keys: ["Right", "Right", "Enter"]
+    cooldown_seconds: 5
+
+  # ------------------------------------------------------------ extends 范例
+  my-agent-2:
+    extends: my-agent                   # 继承 my-agent 全部字段
+    overrides:
+      display_name: My Agent 2
+      tmux_session: my-agent-2

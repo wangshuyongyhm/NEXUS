@@ -50,7 +50,7 @@ def _load_cfg(context: dict | None = None) -> dict:
     env NEXUS_GATE_E2E_PATHS > $NEXUS_HOME/gate/e2e-paths.yaml（用户文件，
     NEXUS_HOME 单源 nexusos-common）> 缺失 → {}（check 层 WARN skip，不再读
     包内 vault 相对 etc/e2e-paths.yaml——示例已移 etc/checks/examples/）。
-    值支持 ${NEXUS_ROOT}/${NEXUS_HOME} 占位展开（vault 不可得时留痕
+    值支持 ${NEXUS_VAULT_ROOT}/${NEXUS_HOME} 占位展开（vault 不可得时留痕
     原样，由 check 层 WARN skip 兜住）。
     """
     p = None
@@ -76,7 +76,7 @@ def _load_cfg(context: dict | None = None) -> dict:
 def _expand(value, vault_root: str):
     """cfg 值占位展开（str 递归进 list；vault 缺失时占位留痕）。"""
     if isinstance(value, str):
-        out = value.replace("${NEXUS_ROOT}", vault_root)
+        out = value.replace("${NEXUS_VAULT_ROOT}", vault_root)
         out = out.replace("${NEXUS_HOME}", str(_nxc.nexus_home()))
         return out
     if isinstance(value, list):

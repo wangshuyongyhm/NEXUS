@@ -26,12 +26,17 @@ def check(params: dict, context: dict, agent: str) -> tuple:
     task_dir = context.get("task_dir", "")
     task_md = str(Path(task_dir) / "input" / "task.md")
     if not Path(task_md).is_file():
-        return True, "task.md 不存在（D1 已拦），跳过契约校验"
+        # 池 #826②（B3）：缺文件 ≠ 跳过。"无法校验"必须显式失败，否则任务书丢了
+        # 契约段也一路绿灯（B1a 实测到的假绿形态）。
+        return False, (
+            f"task.md 不存在（{Path(task_md).parent}），worktree 契约无法校验"
+            "——这不是「跳过」：缺任务书先修 D1 项"
+        )
 
     try:
         text = Path(task_md).read_text(encoding="utf-8", errors="ignore")
     except OSError as e:
-        return True, f"task.md 读取失败（放行，D1 兜底）: {e}"
+        return False, f"task.md 读取失败（契约无法校验，不放行）: {e}"
 
     if not _CODE_KW_RE.search(text):
         return True, "非代码任务（无 lib/.dart/.py/.sh/src 关键词），D8 跳过"

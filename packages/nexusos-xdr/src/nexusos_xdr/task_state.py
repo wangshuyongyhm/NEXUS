@@ -52,10 +52,19 @@ TERMINAL_STATES = {"DONE", "FAILED", "TIMEOUT", "CANCELLED"}
 # interrupted=执行体死亡合成（Harness 式：下一个活着的读者合成） /
 # unknown=历史数据或未传参 /
 # done_after_timeout=Task576 例③: TIMEOUT 终态后真 done 迟到合并
-# （终态不迁移，只升级原因+done_late 标志，见 merge_late_result）
+# （终态不迁移，只升级原因+done_late 标志，见 merge_late_result） /
+# delivery_failed=P0-1 ACK 链（2611111762）：两投均无回执且无进度物证
+# （与 error 区分——投递层失败非执行层失败，运维口径不同）
 END_REASONS = {
     "completed", "error", "aborted", "timeout",
     "cap_exceeded", "interrupted", "unknown", "done_after_timeout",
+    # P0-1 (2611111762): 两投均无回执无物证（投递层失败，与 error 区分）
+    "delivery_failed",
+    # P0-2 (Task 2611111759): REJECT 硬拦——done 回调后台 gate 发现 REJECT 级 fail
+    # → end_reason 翻 gate_blocked（status 仍 DONE、result 不动）。非终态失败语义：
+    # 出路=owner 认领行 + need_decision 回调 + 触发快照（p02_hardblock），
+    # blocked≠死——owner 修复产出重过 done gate 即认领清账。
+    "gate_blocked",
 }
 # Task594: 终态默认映射（update_status 漏传 reason 时的兜底，对齐主流传参统计）
 _DEFAULT_END_REASONS = {
@@ -507,6 +516,71 @@ def once_flag(task_id: str, key: str) -> bool:
         flags[key] = now_iso()
         save_state(state)
         return True
+
+
+def enforce_gate_block(task_id: str, reject_items: list) -> Dict[str, Any]:
+    """P0-2 (Task 2611111759): REJECT 硬拦——已 DONE completed 任务 end_reason 翻 gate_blocked。
+
+    背景：Task492 为防 callback 热路径死锁把 gate 降为「记 warning 不阻断」，
+    1750 实测 20 单 15 单带 REJECT 警告仍 completed（75% 放行）。三前置满足后
+    在后台 gate 线程里翻（零热路径竞争，死锁红线不变）。
+    锁内 RMW；幂等（已 gate_blocked 直接返回，不覆盖首次快照元数据）；只收
+    已 DONE 任务——patrol 拦截路径（不标 DONE 继续等真回调）语义不变（Task476）。
+    reject_items: [{id, severity, detail}, ...]（调用方从 gate failures 提取）。
+    """
+    with _state_lock(task_id):
+        state = load_state(task_id)
+        if state is None:
+            raise ValueError(f"任务 {task_id} 状态文件不存在")
+        if state.get("end_reason") == "gate_blocked":
+            return state  # 幂等：复核重扫不覆盖首次 blocked 元数据
+        if state.get("status") != "DONE":
+            raise ValueError(
+                f"任务 {task_id} status={state.get('status')} 非 DONE——硬拦翻转只适用于 DONE 终态")
+        _codes = sorted({str(r.get("id")) for r in reject_items or [] if r.get("id")})
+        state["end_reason"] = "gate_blocked"
+        state["gate_block"] = {
+            "blocked_at": now_iso(),
+            "rejects": reject_items or [],
+        }
+        state.setdefault("warnings", []).append(
+            f"gate_blocked: REJECT 硬拦生效（{','.join(_codes) or '?'}）——待 owner 认领/复核")
+        save_state(state)
+        return state
+
+
+def clear_gate_block(task_id: str, detail: str = "") -> Optional[Dict[str, Any]]:
+    """P0-① (Task 2611111774): 复核出路——blocked 单重发 done 且 gate PASS 时清账。
+
+    1770 P0① 实证出路断头：enforce_gate_block 幂等只防重复翻转，无 blocked→
+    completed 回路——owner 修复产出后重发 done，merge_late_result 保留原
+    end_reason（duplicate_done 分支），任务永久滞留 gate_blocked。本函数在
+    bg-gate PASS 分支调用：end_reason==gate_blocked → 清回 completed +
+    gate_block.cleared_at/cleared_evidence 留痕 + warning（历史归因三要素）。
+    非 blocked 单返回 None（首次 done 的 PASS 走此路径=零开销 no-op）。
+    锁内 RMW（与 enforce 同款）；幂等：重复 PASS 时 end_reason 已非
+    gate_blocked → 自然 no-op，不重复写留痕。池行闭环由调用方（p02）接续。
+    """
+    with _state_lock(task_id):
+        state = load_state(task_id)
+        if state is None:
+            return None
+        if state.get("end_reason") != "gate_blocked":
+            return None
+        state["end_reason"] = "completed"
+        gb = dict(state.get("gate_block") or {})
+        gb["cleared_at"] = now_iso()
+        gb["cleared_evidence"] = (detail or "done 重发后 gate PASS")[:200]
+        state["gate_block"] = gb
+        # 生命周期对称（P0-② 续，Task 2611111774）：清账恢复「可再拦」——
+        # once_flag p02_hardblocked 同源清除（同锁内直改 once_flags，禁调
+        # once_flag 本体=非重入死锁）。否则清账后再次 REJECT 被幂等门挡死，
+        # 出路反而变成单程票（清账一次后永不能再拦）。
+        state.setdefault("once_flags", {}).pop("p02_hardblocked", None)
+        state.setdefault("warnings", []).append(
+            "gate_blocked 清账: 复核出路走通（重发 done 且 gate PASS）——end_reason 回 completed")
+        save_state(state)
+        return state
 
 
 def save_checkpoint(task_id: str, pane_text: str) -> None:

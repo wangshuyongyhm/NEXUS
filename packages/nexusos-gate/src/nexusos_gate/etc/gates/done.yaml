@@ -1,0 +1,230 @@
+# done 场景门禁 — 小弟 done 回调时检查(Task 365 原 _run_done_gate 迁移)
+# 迁移自 mcp_server.py:678 _run_done_gate(),行为必须完全一致(回归测试验证)
+version: 1
+scenario: done
+description: 小弟 done 回调门禁(规则4:完成度由外部证据定义)
+required_context:
+  - {name: task_id, desc: "任务ID", required: true}
+  - {name: task_path, desc: "任务目录路径(推 output/report.md 用)", required: false}
+  - {name: task_path_report, desc: "report.md 绝对路径(G4 用,从 task_path 推导)", required: false}
+  - {name: files, desc: "产出文件列表", required: true}
+  - {name: summary, desc: "完成摘要", required: true}
+  - {name: experiences, desc: "经验列表", required: false}
+items:
+  # G1: files[] 非空且每个文件真实存在(硬)——规则4 外部证据
+  # B1 修复:原用 field_check 只数 len,小弟可报幽灵路径过门禁。改用 files_exist 逐个验存在
+  - id: G1
+    name: files 存在
+    auto: true
+    severity: REJECT
+    check:
+      type: files_exist
+      jsonpath: files
+      min_len: 1
+
+  # G2: summary 不敷衍(硬)——防"完成"两字打发
+  - id: G2
+    name: summary 充分
+    auto: true
+    severity: REJECT
+    check:
+      type: field_check
+      jsonpath: summary
+      min_len: 10
+
+  # G3: experiences 非空(软)——T350 已处理 missing,只 warn
+  - id: G3
+    name: experiences 非空（回调数组或 MEM DB 写入，T657 二选一）
+    auto: true
+    severity: REJECT  # Task474: 从 WARN 升级（B2）——done 前必须写经验
+    # T657 修2: 648 实证 G3 是全量 FAIL 第一位（84 项）——agent 写 DB 不写
+    # 回调数组是主流行为。二选一：experiences ≥1 或任务时间窗内 source_agent
+    # 在 MEM DB 有写入（experiences_present.py 查 PG）。
+    # 1416 修: 判定 agent 优先取任务状态 callee（终验/接力时调用方署名≠执行者
+    # 的误 REJECT，09181954 两例根因），调用方 agent 参数仅兜底。
+    check:
+      type: experiences_present
+
+  # G4: report.md 存在且 ≥30 行(硬)——落盘质量
+  # T670: 跨目录重定向语义——接力/收口单 report 写在另一任务目录时，files[] 里
+  # 实际存在的 report 路径可解析则降 WARN 附定位（不 REJECT）；纯幽灵仍 REJECT。
+  - id: G4
+    name: report.md 质量（含跨目录重定向，T670）
+    auto: true
+    severity: REJECT
+    check:
+      type: line_count
+      path: "{task_path_report}"
+      min: 30
+
+  # G5: MEM 查询检查——小弟 done 前必须查过 MEM（外部证据 PG agent_activity）
+  # 分析类无 search = REJECT；机械类/未知 = pass（WARN）
+  - id: G5
+    name: MEM 查询检查
+    auto: true
+    severity: REJECT  # 默认 REJECT，插件内部按 task_type 分档返回
+    check:
+      type: mem_queried
+      agent_field: source
+
+  # G6: 省略谎报对账(Task489 项2, ds2 发现最大盲区)
+  # task.md 完成标准步骤 vs report.md 实际执行对账。简单关键词匹配(非NLP)
+  # WARN 起步(验证有效后可升 REJECT)
+  - id: G6
+    name: 步骤完整性对账
+    auto: true
+    severity: WARN
+    check:
+      type: step_completeness
+      report_path: "{task_path_report}"
+
+  # G7: EADC 核心证据锚定(Task489 项3, kimi 设计骨架)
+  # L3 声明无证据 → REJECT; L2 无证据 → pass+建议; L1 → pass
+  - id: G7
+    name: EADC 证据锚定
+    auto: true
+    severity: REJECT
+    check:
+      type: verification_evidence_anchor
+
+  # G8: 复杂度分级(Task489 项1, ds2 发现)——L2 强制 Level3+决策暴露块
+  # L0/L1 放行;L2 缺 Level3 标注或决策暴露块 → fail(本项 REJECT 由插件控制)
+  # 注:persist 场景的 L0 五层资产降级需 gate_engine 动态 severity(超出本次范围,见 report)
+  - id: G8
+    name: 复杂度分级检查
+    auto: true
+    severity: REJECT
+    check:
+      type: complexity_aware
+      report_path: "{task_path_report}"
+
+  # G9: 方法论应用记录（软）——report.md 含方法论应用描述(至少一个方法论+反例)
+  # thinking-methodology §12 运行验证。C13 对抗式审查延伸到非代码任务
+  - id: G9
+    name: 方法论应用记录
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: >
+        grep -qiE "第一性|对抗式|逆向|系统思维|反例|adversarial|edge case|根因" "{task_path_report}" 2>/dev/null
+        || (echo "report.md 未记录方法论应用（建议补：用了哪种方法论+找到的反例/根因）"; exit 1)
+      expect_rc: 0
+      timeout: 5
+
+  # G10: outcome 回填强制(硬,B+方案)——套用过经验必须回填真实结果
+  # Task528(2026-08-14): 认知诚实闭环强制。apply_attempt 存在但 apply_outcome 仍 pending → REJECT
+  - id: G10
+    name: outcome 已回填
+    auto: true
+    severity: REJECT
+    check:
+      type: outcome_filled
+
+  # G11: 产出零新断链(Task592 防断链环,done 时修成本最低)——output/+input/ 的
+  # .md 内 [[链接]] 全部可解析(路径/basename 双解析);代码块内 [[ 是数据不误报
+  # (剥离 ``` 围栏)。task.dispatched.* 自动生成副本豁免。
+  - id: G11
+    name: 产出零新断链
+    auto: true
+    severity: REJECT
+    check:
+      type: no_new_broken_links
+
+  # G12: report 机读状态块(Task597 #48)——report.md 尾部 yaml 围栏块
+  # 存在+合法(status 枚举/continue|blocked 必填 next_steps)。
+  # Task1993 WARN 升 REJECT：池 #574 C⑦ 三连实证（1986/1989/1990 连续三单
+  # 缺机读块，均主控代补——WARN 不疼=没人修，C 家族"提醒型规则对写规则
+  # 的人自己也无效"的活证）。存量旧 report 不追溯（gate 只查当次）。
+  - id: G12
+    name: report 机读状态块
+    auto: true
+    severity: REJECT
+    check:
+      type: report_schema
+      path: "{task_path_report}"
+
+
+  # G13: Agent 档案当日更新(Task698 B, #80 尾巴)——task-spec §2 第 7 项 gate 化。
+  # <vault>/05-System/Agent/<source>/经验与坑.md mtime == done 当日 → pass；
+  # 无当日条目 → WARN"落盘契约第 7 项未做"。WARN 起步(参照 G12 节奏,验证后主控裁决升级)。
+  - id: G13
+    name: Agent 档案当日更新
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: >
+        f="$(printenv NEXUS_AGENT_ARCHIVE || printf '%s' '{vault_root}/05-System/Agent/{source}/经验与坑.md')";
+        if [ ! -f "$f" ]; then echo "档案不存在: $f"; exit 1; fi;
+        d=$(stat -f '%Sm' -t '%Y-%m-%d' "$f");
+        if [ "$d" = "$(date +%Y-%m-%d)" ]; then echo "当日有更新($d)"; exit 0; fi;
+        echo "档案 $f 最后更新 $d 非今日——落盘契约第 7 项未做（写 经验与坑.md 后再 done）";
+        exit 1
+      expect_rc: 0
+      timeout: 10
+  # G14: 任务子图连通(Task956 建闸→09071853 升级覆盖完整性)。
+  # 956 原版只查「## 产出登记」段标题存在——1177 实证"有段但漏列文件"照过闸
+  # (09071853 复发 837 个 task 域孤儿)。插件 task_subgraph_connected 两层:
+  # ① 段存在 ② 任务目录内全部 .md 被任务书 wikilink 覆盖(裸名按 basename 认,
+  # 图谱语义=完全无边的文件才是孤儿)。规范依据 task-spec §2 第 8 项 09071853 版
+  # (枚举含 input/references.md、input/process/full-log.md 错位产物、process/full-log.md)
+  # + 0917 纯文本补丁(1409 统一)：task.dispatched.*.md 副本行纯文本留痕即合规、
+  # 无需 wikilink——副本 done 后被 dispatchd 吞噬(池#102 11 例)，wikilink 必成死链，
+  # 扫描列表侧豁免(镜像 G11 源侧先例，MEM#73346 修法 A)。
+  - id: G14
+    name: 任务子图连通
+    auto: true
+    severity: REJECT
+    check:
+      type: task_subgraph_connected
+
+  # G15: 分支已合并回 main(Task 1376 机制单)——worktree 任务的 done 收口对账。
+  # 任务目录推得出 feat/<任务号> 且集成仓可达时验 merge-base --is-ancestor；
+  # 非 ancestor → WARN(过渡期不 REJECT，提示「先 nexus-wt done 再回调」)。
+  # 无集成仓(NEXUS_WT_REPO / ~/.config/nexus/wt-repo)/无分支场景跳过。
+  - id: G15
+    name: 分支已合并回 main
+    auto: true
+    severity: REJECT
+    check:
+      type: branch_merged_main
+
+  # G18: NEXUS 系统改动 e2e 复测证据(Task1536,用户定向 09240901 固化)。
+  # 系统改动单(判定配置 etc/e2e-paths.yaml:files 命中 pypi/nexus-* 等
+  # 系统路径,或任务书 worktree 契约+系统路径字样兜底)done 前须跑
+  # e2e-suite --quick 全绿(quickref 场景 3F);证据=report yaml 块
+  # e2e_suite: pass / 正文 run-suite 痕迹 / output/files *e2e* 日志。
+  # 套件不存在(Task1535 过渡期)→ WARN 注明;只读复测单(任务书明示)豁免。
+  # 2026-10-14 升 REJECT：39 次命中误报 0、20 天稳定（核对 MEM#96201）。
+  - id: G18
+    name: 系统改动 e2e 复测证据
+    auto: true
+    severity: REJECT
+    check:
+      type: e2e_suite_evidence
+
+  # G19: 机制上线单无启用探针段 WARN(task-spec §7.11 机器化, T1643)。
+  # 双向判定防误报: 命中设计特征(新机制/新防线/新gate/新自动化)任一
+  # 且不含"启用探针"段字样 → WARN;两者都含=pass;都不含=skip(普通单不搅扰)。
+  # 任务书不存在/读取失败 → 空文本 → skip。cmd 内嵌 python 无大括号字面量
+  # (str.format 占位兼容, 1633 ST2 手法); WARN 起步观察, 跑稳再评估升级。
+  - id: G19
+    name: 机制上线单启用探针段
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: >
+        python3 -c 'import sys,re,pathlib; tp=pathlib.Path("{task_path}"); cands=[tp, tp.parent/"task.md", tp/"input"/"task.md", tp.parent/"input"/"task.md"]; p=next((x for x in cands if x.is_file()), None); t=p.read_text(encoding="utf-8",errors="replace") if p else ""; d=bool(re.search("新机制|新防线|新gate|新 gate|新自动化", t)); q="启用探针" in t; print("G19: design=%s probe=%s taskmd=%s" % (d, q, p)); sys.exit(1 if (d and not q) else 0)'
+      expect_rc: 0
+
+  # G20: auto-relocate 产出防护(Task1951 G1=清单P1, MEM#103694 悬空指针形态)。
+  # full-log 两位置+output/files 的指针形态文件(≤3行+外迁+stzb-assets)解析目标验
+  # 实体在位;悬空或解析失败=FAIL-CLOSE REJECT(不确定不放行)。
+  - id: G20
+    name: relocate 指针防悬空
+    auto: true
+    severity: REJECT
+    check:
+      type: relocate_pointer_solid

@@ -30,6 +30,9 @@ def register_routes(mcp) -> None:
     mcp.custom_route("/task/{task_id}", methods=["GET"])(http_task_status)
     mcp.custom_route("/task_state", methods=["GET"])(http_task_state_list)
     mcp.custom_route("/cancel/{task_id}", methods=["POST"])(http_cancel)
+    # P0-1 ACK 链（task 2611111762）：投递回执（执行者第一动作）+ steer 登记
+    mcp.custom_route("/ack", methods=["POST"])(http_ack)
+    mcp.custom_route("/steer", methods=["POST"])(http_steer_register)
     mcp.custom_route("/task/{task_id}/ack", methods=["POST"])(http_task_ack)
 
 
@@ -88,6 +91,69 @@ async def http_task_ack(request: Request) -> JSONResponse:
     except Exception as e:  # noqa: BLE001
         logger.exception("HTTP /task/{id}/ack 异常")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def http_ack(request: Request) -> JSONResponse:
+    """POST /ack — 投递回执（P0-1 ACK 链，task 2611111762）。
+
+    body: {"task_id": "...", "key": "ack-xxx", "agent": "omp", "kind": "dispatch"}
+    kind=steer 时不需 task_id（key 即身份）。幂等：同键重复回执 ok+duplicate。
+    与 /task/{id}/ack（Task1384 done 总结消费回执）是两个协议——本端点是
+    投递确认（收到任务书即发），那个是完成验收（读完总结才发）。
+    """
+    try:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "无效 JSON"}, status_code=400)
+        agent = str(body.get("agent") or "").strip()
+        kind = str(body.get("kind") or "dispatch").strip()
+        key = str(body.get("key") or "").strip()
+        if not agent:
+            return JSONResponse({"error": "agent 必填（回执的执行者名）"}, status_code=400)
+        from nexusos_xdr import ack as ack_mod
+        if kind == "steer":
+            if not key:
+                return JSONResponse({"error": "kind=steer 时 key 必填"}, status_code=400)
+            return JSONResponse(ack_mod.handle_steer_ack(key, agent))
+        task_id = str(body.get("task_id") or "").strip()
+        if not task_id:
+            return JSONResponse({"error": "task_id 必填（kind=dispatch）"}, status_code=400)
+        return JSONResponse(ack_mod.handle_ack(task_id, key, agent, kind))
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("HTTP /ack 异常")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def http_steer_register(request: Request) -> JSONResponse:
+    """POST /steer — steer 投递登记（协议层，task 2611111762）。
+
+    body: {"agent": "kimi", "note": "纠偏 xxx"}→ {steer_key, ack_deadline, ack_cmd}。
+    词法层（消费验证）在 steer.sh（task/2611111761 修），本端点供其/主控登记
+    幂等键并获取回执命令——steer 链的可考古落账（#615/2010 教训）。
+    """
+    try:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "无效 JSON"}, status_code=400)
+        agent = str(body.get("agent") or "").strip()
+        note = str(body.get("note") or "").strip()
+        if not agent:
+            return JSONResponse(
+                {"error": "agent 必填（steer 目标 session 名）"}, status_code=400)
+        from nexusos_xdr import ack as ack_mod
+        return JSONResponse(ack_mod.register_steer(agent, note))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("HTTP /steer 异常")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 

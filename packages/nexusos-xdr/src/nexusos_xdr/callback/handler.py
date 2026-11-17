@@ -49,6 +49,43 @@ def register_routes(mcp) -> None:
     mcp.custom_route("/callback", methods=["POST"])(http_callback)
 
 
+def _build_gate_context(task_id: str, task_path: str, files: list,
+                        summary: str, body: dict) -> dict:
+    """bg-gate context 组装单点（Task 2611111775）——callback 载荷全量转发。
+
+    1774 残留边角实证：闭包内联组装漏 evidence——G7/EADC（REJECT 级，
+    verification_evidence_anchor.check 消费 context["evidence"]）在重发 done
+    场景拿不到显式验证证据 → 降级文本检测 → maybe_clear_on_pass 不触发，
+    复核出路断头。本函数是唯一组装点：evidence/files/summary/experiences/
+    source 全量转发，与 CLI 直调 gate 等价；旧载荷无 evidence 键时不注入
+    （gate 侧 .get 默认 {} 走文本检测——兼容判据不变，禁吞错无兜底分支）。
+    """
+    import re as _re_ctx
+    report_path = (task_path or "").replace("input/task.md", "output/report.md")
+    if "input/" in report_path and "/output/" not in report_path:
+        report_path = _re_ctx.sub(r"input/[^/]+$", "output/report.md", report_path)
+    if report_path.startswith("task/") or not os.path.isabs(report_path):
+        report_full = str(VAULT_ROOT / report_path.lstrip("/"))
+    else:
+        report_full = report_path
+    ctx = {
+        "task_id": task_id,
+        "task_path": task_path,
+        "task_path_report": report_full,
+        "files": files,
+        "summary": summary,
+        "experiences": body.get("experiences", []),
+        # Task778: source 注入 gate context——done.yaml G13 模板 {source}
+        # 缺键致 _resolve_template KeyError 静默原串 → /bin/sh bad substitution。
+        "source": body.get("source", ""),
+    }
+    # 2611111775: evidence 透传（G7/EADC REJECT 级消费；旧载荷无键不注入=兼容）
+    _evidence = body.get("evidence")
+    if isinstance(_evidence, dict) and _evidence:
+        ctx["evidence"] = _evidence
+    return ctx
+
+
 async def http_callback(request: Request) -> JSONResponse:
     """小弟 done 回调入口（Task 277 P1-1：替代 19999 /report，走 task_state 单一真相源）。
 
@@ -208,32 +245,18 @@ async def http_callback(request: Request) -> JSONResponse:
         # gate 结果记 task_state warnings（主控查 /task/{id} 可见）。
         # trade-off：gate 从"REJECT 阻断 DONE"降级为"WARN 记录不阻断"——
         # callback 死锁比个别谎报没被 gate 拦严重得多。gate 拦谎报移到主控验收。
-        def _bg_gate_check(_task_id, _body, _state, _files, _summary):
+        def _bg_gate_check(_task_id, _body, _state, _files, _summary, _done_ev):
             """后台 gate 检查，结果记 warnings（不阻断 DONE）。"""
             try:
                 # Task639 C4: 线程参数 _state 是 done 时刻快照——gate 排队期间
                 # patrol 可能已改写 task_state。重新 load 用最新态（None 时回退快照）。
                 _state = task_state.load_state(_task_id) or _state
-                _task_path = _state.get("task_path", "")
-                _report_path = _task_path.replace("input/task.md", "output/report.md")
-                if "input/" in _report_path and "/output/" not in _report_path:
-                    import re as _re_bg
-                    _report_path = _re_bg.sub(r"input/[^/]+$", "output/report.md", _report_path)
-                if _report_path.startswith("task/") or not os.path.isabs(_report_path):
-                    _report_full = str(VAULT_ROOT / _report_path.lstrip("/"))
-                else:
-                    _report_full = _report_path
-                _gate_ctx_bg = {
-                    "task_id": _task_id,
-                    "task_path": _task_path,
-                    "task_path_report": _report_full,
-                    "files": _files,
-                    "summary": _summary,
-                    "experiences": _body.get("experiences", []),
-                    # Task778: source 注入 gate context——done.yaml G13 模板 {source}
-                    # 缺键致 _resolve_template KeyError 静默原串 → /bin/sh bad substitution。
-                    "source": _body.get("source", ""),
-                }
+                # 2611111775: context 组装收口单点 _build_gate_context——
+                # evidence/files/summary 全量转发与 CLI 直调等价；旧闭包内联
+                # 组装漏 evidence 致 G7/EADC 重发场景文本检测误判（1774 残留）。
+                _gate_ctx_bg = _build_gate_context(
+                    _task_id, _state.get("task_path", ""), _files, _summary, _body)
+                _report_full = _gate_ctx_bg["task_path_report"]
                 _ge = gate_engine_check("done", _gate_ctx_bg,
                                         agent=(_state.get("callee") or _body.get("source", "")))
                 if not _ge.get("passed"):
@@ -256,8 +279,30 @@ async def http_callback(request: Request) -> JSONResponse:
                             task_state.append_warning(_task_id, f"gate未过: {'; '.join(_fails[:3])}")
                     except Exception:
                         pass  # append_warning 可能不存在，只 log
+                    # P0-2 (Task 2611111759): REJECT 硬拦——Task492「记 warning 不阻断」
+                    # 升级：REJECT 级 fail → end_reason=gate_blocked + 触发快照 +
+                    # owner 认领行 + need_decision 复核回调。全部后台线程收口
+                    # （热路径零改动，callback 死锁红线不变）；kill-switch env 可关。
+                    # 异常由外层 _ge_err 兜 log，不在热路径、不吞（fail-loud 上抛）。
+                    if os.environ.get("NEXUS_P02_HARDBLOCK", "1") == "1":
+                        from nexusos_xdr.p02_hardblock import hardblock_rejects
+
+                        hardblock_rejects(
+                            _task_id, _state.get("task_path", ""), _ge,
+                            report_full=_report_full, summary=_summary,
+                            source=_body.get("source", ""), done_event=_done_ev)
                 else:
                     logger.info("[Task492][bg-gate] %s gate 通过", _task_id)
+                    # P0-① (Task 2611111774): 复核出路——blocked 单重发 done 且本次
+                    # gate PASS → 清账回 completed + 池行闭环（1770 P0① 出路断头修复，
+                    # enforce 只防重复翻转无回路的补全）。非 blocked 单零开销 no-op；
+                    # 同 kill-switch 门（P0-2 家族单一开关）；异常外层 _ge_err 兜 log。
+                    if os.environ.get("NEXUS_P02_HARDBLOCK", "1") == "1":
+                        from nexusos_xdr.p02_hardblock import maybe_clear_on_pass
+
+                        maybe_clear_on_pass(
+                            _task_id, _state.get("task_path", ""),
+                            detail=f"bg-gate PASS（重发 done 出路清账）")
                 # Task1450: outcome 自动回填——gate 异步尾巴执行（MEM#70646 防
                 # 再踩：不进回调热路径、gate 完成后跑、模块内幂等双守卫）。
                 # flag 默认 off（灰度由主控定）；off 时零 import 零行为变化。
@@ -270,7 +315,10 @@ async def http_callback(request: Request) -> JSONResponse:
                         logger.warning("[Task1450][autofill] %s 异常(不阻塞): %s", _task_id, _af_e)
             except Exception as _ge_err:
                 logger.warning("[Task492][bg-gate] %s gate 后台检查异常(不阻塞): %s", _task_id, _ge_err)
-        threading.Thread(target=_bg_gate_check, args=(task_id, body, state, files, summary), daemon=True).start()
+        # P0-2 (Task 2611111759): DONE 落定事件——硬拦翻转需等主流程终态写入完成，
+        # threading.Event 高效等待替代 sleep 轮询（C2 反模式根因修复）。
+        _done_ev = threading.Event()
+        threading.Thread(target=_bg_gate_check, args=(task_id, body, state, files, summary, _done_ev), daemon=True).start()
 
         # === Task412: 通电逻辑提前到 update_status 之前 ===
         # 原因：patrol 可能抢先标 DONE → update_status 失败 → _update_failed=True →
@@ -359,6 +407,7 @@ async def http_callback(request: Request) -> JSONResponse:
                 )
             except ValueError as _me:
                 logger.warning(f"[Task576] {task_id} 迟到 done 合并失败: {_me}")
+        _done_ev.set()  # P0-2: 终态已落定（DONE/迟到合并），bg 硬拦可安全判定
         await anyio.to_thread.run_sync(lambda: task_state.append_callback(task_id, body))
 
         # === Task496: auto-relocate 外迁大文件（DONE 公共主路径）===

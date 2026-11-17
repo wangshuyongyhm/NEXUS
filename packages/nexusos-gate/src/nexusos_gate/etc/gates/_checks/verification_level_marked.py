@@ -14,10 +14,13 @@ _COMPLETION_PATTERNS = re.compile(
 )
 
 # 验证等级标注模式
+# #723：补 L1/L2/L3 简写（\b 词边界防 XL2000/GLM2 类误命中）与
+# verification_level 机读块键名——report 按纪律用简写/机读块标注不再误报
 _VERIFICATION_PATTERNS = re.compile(
     r"Level\s*[123]|端到端|函数层|场景验证"
     r"|\[verified|verified:|tested:|checked:level"
-    r"|smoke\s*test|e2e|端到端验证",
+    r"|smoke\s*test|e2e|端到端验证"
+    r"|\bL[123]\b|verification_level",
     re.I,
 )
 

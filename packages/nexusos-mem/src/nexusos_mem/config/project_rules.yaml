@@ -1,10 +1,13 @@
-# project_rules.yaml — embed_server.py 项目路由规则（示例版 · Task1949）
-# 正式版含私项目 keyword；OSS 部署按需改写（schema 不变）。
+# project_rules.yaml — embed_server.py 项目路由规则（Task 282 P2-7）
+# 原 nexus/embed_server.py:251 project 推断硬编码
+#   project = "stzb" if "stzb" in rel_path else (
+#       "nexusos-mem" if "NEXUS" in rel_path else None)
+# 现外置到 YAML，按 keyword 命中优先级匹配
 
 # 规则数组（按顺序匹配，命中即返回 project 值）
 rules:
-  - keyword: demo-project-a
-    project: demo-project-a
+  - keyword: stzb
+    project: stzb
   - keyword: NEXUS
     project: nexusos-mem
 

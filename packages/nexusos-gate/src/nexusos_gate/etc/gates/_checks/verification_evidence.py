@@ -155,7 +155,7 @@ def _is_substantive_verify(fpath: str, project_root: str) -> bool:
     """
     p = Path(fpath).expanduser()
     if not p.is_absolute():
-        root = project_root or os.environ.get("NEXUS_ROOT", "")
+        root = project_root or os.environ.get("NEXUS_VAULT_ROOT", "")
         if not root:
             return False
         p = Path(root) / fpath

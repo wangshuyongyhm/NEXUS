@@ -81,7 +81,8 @@ def apply_session_timeouts(conn):
 #     恒 0.0 by design（双真源会造成排序口径漂移）。禁止给本列加 writer。
 #   - debt_score (real DEFAULT 0.0): 【Task655 已启用】知识债 = 0.4×failed outcome
 #     + 0.3×被活跃 counterexample 引用 + 0.3×superseded_by 非空，clamp 1.0。
-#     存量回填 + 每日重算 cron（ai.nexus.mem-debt-daily，03:10）。可安全 SELECT。
+#     存量回填已跑（Task655）；每日重算 cron ai.nexus.mem-debt-daily 已于 2026-11-11
+#     停用（债务视图冻结在最后一次重算值，需重算时手动跑 crucible_trigger.py）。可安全 SELECT。
 #   - confidence_source (varchar DEFAULT 'llm'): Task 257 已证伪（σ 是 artifact），
 #     仅 Task 255 一次性 backfill 写过，之后死字段。
 # 详见：

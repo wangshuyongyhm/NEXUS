@@ -253,6 +253,8 @@ def register_agent(
             "current_task": current_task,
         }
         save_sessions(sessions)
+    if session_id:
+        _agent_session_hint[agent] = session_id
     logger.info(f"[presence] register: {agent} role={role} task={current_task}")
     return sessions
 
@@ -279,6 +281,8 @@ def heartbeat_agent(
     valid, reason = validate_agent(agent)
     if not valid:
         raise ValueError(reason)
+    if session_id:
+        _agent_session_hint[agent] = session_id
     with _sessions_lock():
         sessions = load_sessions()
         if agent not in sessions:
@@ -308,6 +312,7 @@ def unregister_agent(agent: str) -> Dict[str, Any]:
             del sessions[agent]
             save_sessions(sessions)
             logger.info(f"[presence] unregister: {agent}")
+    _agent_session_hint.pop(agent, None)
     return sessions
 
 
@@ -335,6 +340,38 @@ def get_active_sessions() -> Dict[str, Any]:
 # ============================================================================
 # events.jsonl — 事件流（追加写）
 # ============================================================================
+
+# --- OTel GenAI semconv 对齐（Task 2611111758，只增不改） ---------------------
+# 背景：观测平台（Langfuse/LangSmith/Arize）2026 收敛到 OTel GenAI 语义约定；
+# 事件写入时顺手派生 otel_* 对齐字段，未来接任意观测平台零改造。
+# 映射真源：包 README「OTel GenAI semconv 对齐」节。既有字段名/语义零变动。
+OTEL_GEN_AI_SYSTEM = "nexus"
+
+# agent → session_id 内存提示：register/heartbeat 写在场表时顺手维护（零额外 IO；
+# append_event 禁回查注册表——_sessions_lock 是 flock 文件锁，重入会自锁死）
+_agent_session_hint: Dict[str, str] = {}
+
+
+def _otel_envelope(agent: str, event_type: str, event: Dict[str, Any]) -> None:
+    """就地补 OTel GenAI semconv 对齐字段（otel_* 前缀，setdefault 语义）。
+
+    调用方 extra 里显式提供的 otel_* 优先（覆盖派生值）；session_id 取
+    extra 顶层值，缺席时回退内存提示缓存，仍无则省略该字段（缺席=未知）。
+    """
+    defaults: Dict[str, Any] = {
+        "otel_gen_ai_system": OTEL_GEN_AI_SYSTEM,
+        "otel_gen_ai_agent_name": agent,
+        "otel_gen_ai_operation_name": event_type,
+        "otel_event_name": f"nexus.{event_type}",
+        "otel_event_domain": "gen_ai",
+    }
+    if "otel_gen_ai_session_id" not in event:
+        sid = str(event.get("session_id") or _agent_session_hint.get(agent, "") or "")
+        if sid:
+            defaults["otel_gen_ai_session_id"] = sid
+    for key, value in defaults.items():
+        event.setdefault(key, value)
+
 
 def append_event(
     agent: str,
@@ -370,6 +407,7 @@ def append_event(
     }
     if extra:
         event.update(extra)
+    _otel_envelope(agent, event_type, event)
 
     # 追加写（天然防并发——每行独立 append）；Task1951 G8: 写当日归档文件
     EVENTS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -916,6 +954,7 @@ def unregister_agent(
                 }
         sessions.pop(agent, None)
         save_sessions(sessions)
+    _agent_session_hint.pop(agent, None)
     # 事件写在锁外（与 cleanup_stale_sessions 同模式）
     append_event(agent, "cleanup", detail=f"主动注销: {reason or '未注明原因'}")
     logger.info(f"[presence] {agent} 主动注销（reason={reason or '无'}）")

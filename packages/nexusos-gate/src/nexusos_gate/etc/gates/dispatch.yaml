@@ -1,0 +1,240 @@
+# dispatch 场景门禁 — 派任务前检查(POST /dispatch 前)
+# 对应设计 §3.2 D1-D4。保证任务书齐全、硬编码实测、完成/不做冲突提醒。
+version: 1
+scenario: dispatch
+description: 派任务前门禁(任务书齐全 + 硬编码实测 + 冲突提醒)
+required_context:
+  - {name: task_id, desc: "任务 ID", required: true}
+  - {name: task_dir, desc: "任务目录路径", required: true}
+  - {name: target_agent, desc: "目标 Agent", required: true}
+  # Task545: 调用者 Agent 名（gate 事件归因用）——原缺此字段致事件 agent=mcp
+  # 未注册被 append_event 校验拒 → 静默零写入（dispatch gate 事件从不落盘）
+  - {name: agent, desc: "调用者 Agent 名(事件归因)", required: true}
+items:
+  # D1: 任务书存在(硬)——task_dir/input/task.md 必须有
+  - id: D1
+    name: 任务书存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{task_dir}/input/task.md"
+
+  # D2: references.md 存在(硬)——任务必带的输入清单
+  - id: D2
+    name: references.md 存在
+    auto: true
+    severity: REJECT
+    check:
+      type: file_exists
+      path: "{task_dir}/input/references.md"
+
+  # D3: 完成 vs 不做冲突(软)——manual:派活前自查任务不该被做的理由
+  - id: D3
+    name: 完成 vs 不做冲突
+    auto: false
+    severity: WARN
+    reminder: |
+      [manual] 派活前自查:
+      1. 此任务是否在"不做清单"或已决定不做?(查 06-Memory/decisions)
+      2. 此任务是否已经完成过?(查 06-Memory/experiences + task index)
+      3. 完成判据是否明确(否则做完没法验)
+      若有冲突,停派活先解决。
+
+  # D4: hardcode 实测(硬)——task.md 中提到的关键数字必须有实测依据
+  - id: D4
+    name: hardcode 实测
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 扫 task.md 找疑似硬编码阈值(数字 + 单位/关键词),无依据则失败
+      # 注意:必须用 literal scalar(|) 不能用 folded scalar(>)
+      # folded 会把注释行和代码行折叠成一行,# 注释会吞掉后面的代码赋值
+      cmd: |
+        f="{task_dir}/input/task.md"
+        if [ ! -f "$f" ]; then echo "task.md 不存在"; exit 1; fi
+        # 抓疑似硬编码:数字+ms/s/MB/GB/阈值/≥/≤ 等（2611111546：ms/s 加 \b 词边界——
+        # 「check_D1 status=ok」的「1 s」被当「1 秒」误拦，2611111433 实踩 task/2611111442 验收行；
+        # \b 后「360 s」「500 ms」「10ms」真硬编码仍命中、「1 status」不命中，实测八例定谳）
+        hits=$(grep -nE "[0-9]+ ?(ms\b|s\b|MB|GB|阈值|≥|≤|>|<)" "$f" | wc -l | tr -d ' ')
+        # 抓"实测/measure/bench"等依据关键词
+        evid=$(grep -ciE "实测|measure|bench|依据|基准" "$f")
+        if [ "$hits" -gt 0 ] && [ "$evid" -eq 0 ]; then
+          echo "发现 $hits 处疑似硬编码,但无实测依据"
+          exit 1
+        fi
+        echo "hardcode 检查通过(疑似 $hits,依据 $evid)"
+      expect_rc: 0
+      timeout: 10
+
+  # D5: 回调感知校验(软)——2026-07-30 会话07300912 事故固化
+  # 事故: zcode 裸 curl /dispatch 绕过 start_tool.sh 封装, wait_callback 没启动,
+  #       小弟 done 后主控收不到通知(靠用户提醒才发现)。
+  # 设计: gate 查不到"是否真启动 wait_callback"(那是 harness 后台行为),
+  #       只能用 manual reminder 强制主控每次 dispatch 前浮现这条纪律。
+  # severity=WARN(非REJECT): 这是主控纪律问题,不是任务书产物缺失。
+  #         裸 curl 能绕过 gate_check(D5 形同虚设),靠 init.md §5 知识到位 + monitor 事后审计补。
+  - id: D5
+    name: 回调感知机制
+    auto: false
+    severity: WARN
+    reminder: |
+      [manual] dispatch 后回调感知自查(违反=小弟 done 你收不到通知):
+      1. 你用的是 start_tool.sh dispatch 吗?(它自动 start_wait_callback 轮询 task_state)
+         若裸 curl /dispatch → STOP, 改用: start_tool.sh dispatch <session> <task_file>
+         (裸 curl 绕过所有门禁+wait_callback 启动, 是 07300912 事故根因)
+      2. 若必须裸 API(如 zcode 无头环境), dispatch 后同一 turn 内二选一:
+         a. 启动 wait_callback.sh <task_id> <task_dir> (run_in_background=true, harness 自动通知)
+         b. dispatch 时传 notify_url=<你的回调端点> (xdr patrol done 后主动 POST)
+         两条至少开一条, 否则 done 感知全断。
+      3. 依据: dispatch-orchestrator.md §「回调感知铁律」(L220-221)
+         "dispatch 后同一 turn 内启动回调监控, 不开=done 了不知道"
+
+  # D6: 任务书父锚校验(Task592 防断链环,源头拦)——parent_anchors 段 ≥1 个
+  # 且锚目标在 Vault 真实存在(路径/basename 双解析,对齐 Obsidian 规则)。
+  # 插件内置宽限: 08-20 00:00 前缺锚/锚不存在放行(detail 报清单),
+  # 之后自动切 REJECT 语义(免人工改 yaml; yaml severity 保持 REJECT 由插件控)。
+  - id: D6
+    name: 任务书父锚
+    auto: true
+    severity: REJECT
+    check:
+      type: parent_anchors
+
+  # D7: 并行冲突消费(软)——Task703 协议A(A1), 池#68。
+  # 双数据源: op-log 120s 瞬时窗 + task_state active 长窗口目标域重叠检测。
+  # WARN 级: 重叠只提醒不拦(并行是目标,知情+留痕即可; task/701 design §1.3)。
+  # xdr DOWN → fail-open 放行+记痕(design A-攻5, 同 pre-commit hook 先例)。
+  # 🔴 cmd 禁裸花括号组/{}/f-string(MEM#62616: str.format 整串回退致
+  #    {task_dir} 占位符失效)——python 体零花括号, 变量经 env 传入,
+  #    env 缺省用 ${{VAR:-x}} 双花括号形态(init.yaml I1 同款先例)。
+  - id: D7
+    name: 并行冲突消费
+    auto: true
+    severity: WARN
+    check:
+      type: command
+      cmd: |
+        TASK_DIR="{task_dir}" CALLER="{agent}" XDR_URL="${{XDR_URL:-http://127.0.0.1:19998}}" python3 - <<'PYEOF'
+        import json, os, re, sys, urllib.request
+        xdr = os.environ.get('XDR_URL') or 'http://127.0.0.1:19998'
+        task_dir = os.environ.get('TASK_DIR') or ''
+        me = os.environ.get('CALLER') or ''
+        def fetch(url):
+            try:
+                with urllib.request.urlopen(url, timeout=4) as r:
+                    return json.loads(r.read().decode('utf-8', 'replace'))
+            except Exception as e:
+                print('[D7] fetch 失败(放行): %s %s' % (url, e))
+                return None
+        dom_pat = re.compile(r'(?:05-System|01-Projects|02-Areas|03-Daily|04-Templates|06-Memory|task)/[0-9A-Za-z_\-\\u4e00-\\u9fff]+(?:/[0-9A-Za-z_\-\\u4e00-\\u9fff]+)?')
+        def domains(text):
+            out = []
+            for m in dom_pat.findall(text or ''):
+                d = '/'.join(m.split('/')[:2])
+                if d not in out:
+                    out.append(d)
+            return out
+        my_md = ''
+        try:
+            with open(task_dir + '/input/task.md', encoding='utf-8', errors='replace') as f:
+                my_md = f.read()
+        except OSError:
+            pass
+        my_dom = domains(my_md)
+        conflicts = []
+        ts = fetch(xdr + '/task_state')
+        if ts:
+            for t in ts.get('active') or []:
+                tp = t.get('task_path') or ''
+                if not tp or tp.startswith(task_dir):
+                    continue
+                try:
+                    with open(tp, encoding='utf-8', errors='replace') as f:
+                        their_dom = domains(f.read())
+                except OSError:
+                    continue
+                overlap = [d for d in their_dom if d in my_dom]
+                if overlap:
+                    conflicts.append('active 任务 %s(%s, 目标域重叠: %s)' % (t.get('task_id', '?'), t.get('callee', '?'), ','.join(overlap[:4])))
+        ol = fetch(xdr + '/session/op-log?within=120')
+        if ol:
+            for op in ol.get('ops') or []:
+                if op.get('agent') == me:
+                    continue
+                tgt = op.get('target') or ''
+                for d in my_dom:
+                    if d and d in tgt:
+                        conflicts.append('op-log 120s: %s %s %s' % (op.get('agent', '?'), op.get('op', '?'), tgt[:80]))
+                        break
+        if conflicts:
+            print('[D7] 并行冲突嫌疑 %d 条(派发前请消费/错峰, WARN 不拦):' % len(conflicts), file=sys.stderr)
+            for c in conflicts:
+                print('  - ' + c, file=sys.stderr)
+            sys.exit(1)
+        print('[D7] 无并行冲突(task_state active + op-log 120s)')
+        PYEOF
+      expect_rc: 0
+      timeout: 10
+
+  # D8: 代码任务 worktree 契约(Task 1376 机制单)——含代码改动关键词的任务书
+  # 必须带「worktree 契约」段(基线=集成仓 main、nexus-wt start/done、merge 回 main)。
+  # 背景: 9 worktree/9 分支漂移两次丢修复(1340/1346、Build43 疑云)，用户拍板方案 A
+  # (单集成仓+任务级 worktree)——机制不靠自觉，派发源头强制。REJECT 级。
+  # 契约关键词 nexus-wt / 集成仓 main / merge 回 main 任二命中即过；
+  # 非代码任务(无 lib/.dart/.py/.sh/src/ 关键词)跳过。
+  - id: D8
+    name: 代码任务 worktree 契约
+    auto: true
+    severity: REJECT
+    check:
+      type: worktree_contract
+
+  # D9: done 总结强制消费(Task 1384，用户定向 0917)——窗口 24h 内存在
+  # DONE 且未 ack 的任务 → REJECT 拦派单。背景: 1382 总结的 SSH 密码失联
+  # 预警被主控漏看，险些服务器停摆——总结必须被复述消费(POST /task/{id}/ack
+  # 带 key_points)，不是躺 task_state 等人翻。插件 done_ack(直接 import
+  # task_state；不可达 fail-open 留痕)。
+  - id: D9
+    name: done 总结已消费(ack)
+    auto: true
+    severity: REJECT
+    check:
+      type: done_ack
+      window_hours: 24
+
+  # D10: 对比类任务书单变量声明（Task1893，261024 用户拍板"做掉"，task-spec §7.12 机器化）——
+  # 对比/实验类任务书（花用户钱的实验）必须含单变量声明（§7.12 模板段），缺=REJECT。
+  # 判定逻辑（1890/1891/1892 实证校准）：
+  #   声明口径=含「单变量」即算已声明（覆盖 单变量声明/单变量铁律/单变量对比 段名写法，1892 实证）
+  #   触发=对比类词粗筛后剔除引用/产物形态（对比图/对比拼图/留对照/存…对照/对比终裁/对比试点/
+  #   历史任务号引用）——1890「拼对比图」「1889 对比终裁」1891「存 *_local.jpg 对照」均非实验语义
+  #   校准 2611111440（池#612 三类假阳性剔除，261103+2611110941 实证）：
+  #   案例库对照 —— task-spec §7.9 规范自身强制声明短语（「案例库对照声明」及带冒号变体同前缀），
+  #                规范要求写、gate 不得拦（261103 task/2010×2+2011×1 三连伤 + 2611110941 首跑 REJECT）
+  #   真实验证   —— 跨字误切（「真实」+「验证」被切出「实验」子串，261103 实证，池#612②）
+  #   选项A/B    —— need_decision 回调模板占位符（2611110941 任务书 96 行命中，池#612③）
+  #   破坏性实验 —— 防御语境（「严禁在真实仓做破坏性实验」=不许乱来，非任务性质），
+  #                2611111433 实踩 task/2611111441 任务书 3 行（§6/§8/陷阱4），主控被迫改词「操作」绕过
+  #   🔴 cmd 体禁止 `{n,m}` 区间量词（str.format 把 {0,10} 当占位符→整串回退→{task_dir} 失效，
+  #   本单实踩两次）：正则区间改平铺（[0-9] 连写 / [^ ]* 空格组合）
+  - id: D10
+    name: 对比类任务书单变量声明
+    auto: true
+    severity: REJECT
+    check:
+      type: command
+      # 注意: literal scalar(|) 防折叠吞注释（D4 同款）；cmd 体零花括号（str.format 陷阱 MEM#62616）
+      cmd: |
+        f="{task_dir}/input/task.md"
+        if [ ! -f "$f" ]; then echo "skip: task.md 不存在（D1 负责存在性）"; exit 0; fi
+        if grep -q "单变量" "$f"; then echo "D10 通过：单变量声明在场（§7.12）"; exit 0; fi
+        hits=$(grep -E "对比|对照|A/B|AB 测试|实验|评测" "$f" | grep -vE "对比图|对比拼图|留对照|存 *[^ ]* *对照|对比终裁|对比试点|[0-9][0-9][0-9][0-9] ?对比|案例库对照|真实验证|选项A/B|破坏性实验" | wc -l | tr -d ' ')
+        if [ "$hits" -gt 0 ]; then
+          echo "对比类任务书缺单变量声明段（触发词残留命中 $hits 行）——task-spec §7.12：对照实验一次只动一个变量，缺声明=1889 混变量翻车覆辙（花用户的钱）" >&2
+          exit 1
+        fi
+        echo "D10 通过：非对比类任务书（触发词零残留）"
+      expect_rc: 0
+      timeout: 10

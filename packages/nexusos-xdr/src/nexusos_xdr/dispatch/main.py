@@ -671,6 +671,29 @@ def dispatch(
                 logger.info(f"[Task473][{task_id}] search 命令块已注入副本正文 (cred={'有' if _search_cred_id else '无'})")
             except Exception as _si_e:
                 logger.warning(f"[Task473][{task_id}] search 命令块注入异常（fail-open）: {_si_e}")
+
+            # === P0-1 ACK 链（2611111762）：投递回执协议注入 + 键登记 ===
+            # 执行者第一动作=POST /ack（收到即回执，先于 MEM 检索）；重复投递
+            # （同 task_id 已 ack）仅再回执不重执行。单次登记（inject 时）——
+            # deadline 从登记起算，send 在秒级窗口内跟进，偏差可忽略；重复调
+            # register_delivery 会虚增 attempts（那是 patrol 重投专用语义）。
+            try:
+                from nexusos_xdr import ack as _ack_mod
+                _ack_key = _ack_mod.register_delivery(task_id)
+                _ack_block = (
+                    f"\n## 🔴 P0-1 ACK 回执（收到任务书第一动作，先于一切）\n"
+                    f"```bash\n"
+                    f"curl -s -X POST http://127.0.0.1:19998/ack "
+                    f"-d '{{\"task_id\":\"{task_id}\",\"key\":\"{_ack_key}\","
+                    f"\"agent\":\"{to}\",\"kind\":\"dispatch\"}}'\n"
+                    f"```\n"
+                    f"重复投递（同 task_id 已收到并回执过）：勿重复执行，仅再 POST 上面回执一次。\n"
+                )
+                _cur_text3 = dispatched_path.read_text(encoding='utf-8')
+                _atomic_write_text(dispatched_path, _cur_text3 + _ack_block)
+                logger.info(f"[P0-1][{task_id}] ACK 协议块已注入副本 (key={_ack_key})")
+            except Exception as _ak_e:
+                logger.warning(f"[P0-1][{task_id}] ACK 注入异常（fail-open，patrol 走 legacy 判据）: {_ak_e}")
         except Exception as e:
             logger.warning(f"[Task393][{task_id}] 凭据签发异常（fail-open）: {e}")
 

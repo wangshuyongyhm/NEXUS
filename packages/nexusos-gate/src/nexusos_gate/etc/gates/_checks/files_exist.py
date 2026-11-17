@@ -10,6 +10,12 @@ file_exists.py 只支持单 path/glob,不支持数组遍历,故新增此插件�
      Vault 外独立 git 工程（如量化 bot/中枢仓）的任务, report.md 机读块声明
      `repo_root: /绝对路径`, files 相对路径按该仓库根二次解析, detail 注
      external-repo）。仍不存在 = 真幽灵, REJECT 语义不动（陷阱1: 不降级）。
+
+候选重试序（2611111773 注解剥离 + 2611172040 补完，池 #858 / MEM#116284）：
+  每条 files 条目按「原始串 → 去首尾空白 → 剥尾部单括号对注解 → 两者叠加」逐个
+  试，任一命中即 pass；全 miss 才 fail，且 fail 明细列出每个条目试过的完整候选序
+  （只报原串会让排障者误以为文件真缺）。原始串永远第一个试——先剥后试会误伤
+  「真文件名尾部含括号 / 首尾带空白」的合法路径。
 """
 
 # Task1597 参数化：vault 根经 env/仓内推导解析，不再硬编码本机路径
@@ -27,6 +33,37 @@ _VAULT_ROOT = vault_root()
 # 机读块 repo_root 行（yaml: `repo_root: /abs/path`——仅认绝对路径, 防相对套相对;
 # 支持 yaml 行尾注释 `# ...`, Task898 契约）
 _REPO_ROOT_RE = re.compile(r"^\s*repo_root:\s*(/\S+?)\s*(?:#.*)?$", re.M)
+
+# 2611111773：尾部行内注解剥离（池 #858 / 1550 单——done 回调 files 带
+# 「路径（备注）」形态时注解被吃进路径，真文件误判幽灵）。仅剥尾部单个括号对
+# （内容不含嵌套括号）；路径中段括号（真文件名 report(2).md）不剥。
+_TRAILING_ANNOT_RE = re.compile(r"\s*[（(][^（）()]*[）)]\s*$")
+
+
+def _strip_trailing_annotation(fpath: str) -> str:
+    """剥离 files 条目的尾部行内注解（中文/英文括号）。无注解原样返回。"""
+    return _TRAILING_ANNOT_RE.sub("", fpath)
+
+
+def _strip_edge_whitespace(fpath: str) -> str:
+    """剥掉首尾空白（files 里手写列表常见的抄录残痕）。"""
+    return fpath.strip()
+
+
+def _candidates_for(fpath: str) -> list:
+    """候选重试序——原始串永远第一个（#116284 核心裁定，陷阱1）。
+
+    先试后剥＝预剥离换皮，会误伤「真文件名尾部含括号/首尾空白」；所以顺序是
+    原串 → 去首尾空白 → 剥尾部注解 → 两者叠加。去重保序。
+    """
+    trimmed = _strip_edge_whitespace(fpath)
+    candidates = [fpath]
+    for candidate in (trimmed,
+                      _strip_trailing_annotation(fpath),
+                      _strip_trailing_annotation(trimmed)):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
 
 
 def _resolve_path(fpath):
@@ -77,36 +114,62 @@ def check(params: dict, context: dict, agent: str) -> tuple:
     # 1. 数量检查(与 field_check 一致,防空数组)
     if len(value) < min_len:
         return False, f"'{jsonpath}' 文件数 {len(value)} < {min_len}"
-    # 2. 逐个验证存在性(核心:防幽灵路径; Task898 三级解析)
+    # 2. 逐个验证存在性(核心:防幽灵路径; Task898 三级解析 + 2611111773 注解剥离)
     repo_roots = None   # 惰性提取（首个外部相对路径触发才读 report）
     missing = []
+    missing_candidates = []   # B1b/陷阱3：每个幽灵条目试过的候选序（fail 明细必须列全）
     external_hits = 0
+    annotation_hits = 0  # 2611111773：注解剥离后才命中的条目数（detail 注明）
     for fpath in value:
         if not isinstance(fpath, str):
             missing.append(f"非字符串: {fpath!r}")
             continue
-        p = _resolve_path(fpath)
-        if p.exists():
-            continue
-        # Vault 根解析失败（仅相对路径可能走到这——绝对路径不存在就是真幽灵）
-        # → Task898: report 机读块 repo_root 二次解析
-        if not os.path.isabs(fpath) and not fpath.startswith("~"):
-            if repo_roots is None:
-                repo_roots = _repo_roots_from_context(context)
-            hit = next((r for r in repo_roots
-                        if (Path(r) / fpath).exists()), None)
-            if hit:
+        # 候选重试序（B1b 收编 _candidates_for）：原路径优先（真文件名尾部含
+        # 括号/首尾空白的保护）→ 去首尾空白 → 剥尾部注解 → 两者叠加
+        # → repo_root 二次解析（每个候选都试，剥离不缩小解析域）
+        candidates = _candidates_for(fpath)
+        hit = False
+        hit_annotated = False
+        hit_external = False
+        for cand in candidates:
+            p = _resolve_path(cand)
+            if p.exists():
+                hit = True
+                hit_annotated = (cand != fpath)
+                break
+            # Vault 根解析失败（仅相对路径可能走到这——绝对路径不存在就是真幽灵）
+            # → Task898: report 机读块 repo_root 二次解析
+            if not os.path.isabs(cand) and not cand.startswith("~"):
+                if repo_roots is None:
+                    repo_roots = _repo_roots_from_context(context)
+                if next((r for r in repo_roots
+                         if (Path(r) / cand).exists()), None):
+                    hit = True
+                    hit_annotated = (cand != fpath)
+                    hit_external = (cand == fpath)  # 原路径经 repo_root 命中才计 external
+                    break
+        if hit:
+            if hit_annotated:
+                annotation_hits += 1
+            if hit_external:
                 external_hits += 1
-                continue
+            continue
         missing.append(fpath)
+        missing_candidates.append({"input": fpath, "candidates": candidates})
     if len(missing) > allow_missing:
         preview = missing[:5]
         suffix = f" ...等 {len(missing)} 个" if len(missing) > 5 else ""
-        return False, f"{len(missing)}/{len(value)} 文件不存在: {preview}{suffix}"
+        # B1b/陷阱3：只报原串会让排障者以为文件真缺——必须列出每个条目的候选序
+        tried = "；".join(
+            f"{entry['input']} 试过 {entry['candidates']}" for entry in missing_candidates[:5])
+        return False, f"{len(missing)}/{len(value)} 文件不存在: {preview}{suffix}（候选重试序: {tried}）"
     if missing:
         return True, f"通过({len(missing)} 个缺失在 allow_missing={allow_missing} 内)"
-    if external_hits:
-        return True, (f"全部 {len(value)} 个文件存在"
-                      f"（含 {external_hits} 个 external-repo: report 机读块"
-                      f" repo_root 解析, Task898）")
+    if external_hits or annotation_hits:
+        parts = []
+        if annotation_hits:
+            parts.append(f"{annotation_hits} 个经候选变形命中（去首尾空白/剥尾部注解）")
+        if external_hits:
+            parts.append(f"{external_hits} 个 external-repo: report 机读块 repo_root 解析")
+        return True, f"全部 {len(value)} 个文件存在（{'；'.join(parts)}, Task898/2611111773）"
     return True, f"全部 {len(value)} 个文件存在"

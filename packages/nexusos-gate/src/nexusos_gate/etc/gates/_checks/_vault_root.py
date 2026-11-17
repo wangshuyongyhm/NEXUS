@@ -19,12 +19,12 @@ from nexusos_common import auto_scripts_dir
 
 
 def vault_root() -> str:
-    """vault 根解析：NEXUS_ROOT env > 哨兵推导（nexusos-common 单源，1957）。
+    """vault 根解析：NEXUS_VAULT_ROOT env > 哨兵推导（nexusos-common 单源，1957）。
 
     空串不是错误值——下游 file_exists 等检查拿它拼路径会得到不存在的
     路径，按原逻辑报「文件不存在」，这比指向别人机器的假路径诚实。
     """
-    env = os.environ.get("NEXUS_ROOT")
+    env = os.environ.get("NEXUS_VAULT_ROOT")
     if env:
         return env
     auto_dir = auto_scripts_dir(Path(__file__))

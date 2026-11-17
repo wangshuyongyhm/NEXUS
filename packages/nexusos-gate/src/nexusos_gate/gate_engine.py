@@ -254,6 +254,74 @@ def _ensure_vault_root(cfg: dict, context: dict):
     return None
 
 
+# 检查项会拿这些键去拼文件路径（池 #613）。入口统一绝对化后下发：
+# D1 因插件内部自行解析相对路径能找到文件，D4/D6/D8 却直接拿字面量拼——
+# gate 进程 cwd ≠ 任务目录时 D4 硬红、D6/D8 静默跳过（假 pass）。
+PATH_CONTEXT_KEYS = ("task_dir", "task_path", "task_path_report")
+
+
+def _path_candidates(raw: str, vault_root: str) -> list:
+    """相对路径的候选解析顺序：进程 cwd → vault_root（都记进诊断，供 rc=1 展示）。"""
+    candidates = [os.path.abspath(raw)]
+    if vault_root and not os.path.isabs(raw):
+        vault_candidate = os.path.abspath(os.path.join(vault_root, raw))
+        if vault_candidate not in candidates:
+            candidates.append(vault_candidate)
+    return candidates
+
+
+def _normalize_path_context(context: dict) -> dict:
+    """入口处把路径类 context 键统一绝对化后回写，返回诊断记录。
+
+    幂等：绝对路径进来只被规范形（abspath(abspath(x)) == abspath(x)）。
+    相对路径取「进程 cwd → vault_root」第一个存在的候选；都不存在时保留
+    cwd 解析结果（确定性），把所有尝试过的路径记进诊断供失败明细展示。
+    """
+    diagnostics = {}
+    vault_root = str(context.get("vault_root") or os.environ.get("NEXUS_VAULT_ROOT") or "")
+    for key in PATH_CONTEXT_KEYS:
+        raw = context.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        if os.path.isabs(raw):
+            attempts = [os.path.abspath(raw)]
+            resolved = attempts[0]
+        else:
+            attempts = _path_candidates(raw, vault_root)
+            resolved = next((c for c in attempts if os.path.exists(c)), attempts[0])
+        context[key] = resolved
+        diagnostics[key] = {
+            "input": raw,
+            "resolved": resolved,
+            "exists": os.path.exists(resolved),
+            "attempted": attempts,
+        }
+    return diagnostics
+
+
+def _path_hint_text(diagnostics: dict) -> str:
+    """把路径诊断拼成一行，供失败明细/CLI stderr 展示。"""
+    parts = []
+    for key, info in diagnostics.items():
+        state = "存在" if info["exists"] else "不存在"
+        parts.append(f"{key}={info['resolved']}（{state}；尝试过: {' / '.join(info['attempted'])}）")
+    return "；".join(parts)
+
+
+def _attach_path_diagnostics(result: dict, diagnostics: dict) -> None:
+    """给失败项补「路径诊断」尾巴（rc=1 排障最小信息面：check 名 + 文件 + 尝试路径）。"""
+    if not diagnostics:
+        return
+    has_missing_path = any(not info.get("exists") for info in diagnostics.values())
+    hint = _path_hint_text(diagnostics)
+    for item in result.get("failures", []):
+        if item.get("status") != "fail":
+            continue
+        detail = str(item.get("detail", ""))
+        if has_missing_path or "rc=1" in detail or "不存在" in detail:
+            item["detail"] = f"{detail}｜路径诊断: {hint}"
+
+
 # Task538 修复5: on_pass 钩子注册表（从 mcp_server 下沉到 engine）
 # gate_engine.check() passed 后自动触发——CLI/其他 caller 也受益
 _ON_PASS_HOOKS: dict = {}  # {scenario: callback(scenario, context, result)->None}
@@ -288,6 +356,10 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
                    "severity": "REJECT", "detail": vr_err}
         return {"passed": False, "failures": [vr_item],
                 "hard_fails": [vr_item], "warns": []}
+
+    # 2.5 池 #613: 路径类 context 键入口统一绝对化（全部检查项收到的都是绝对路径，
+    #     不在各 check 里各自打补丁）；诊断记录随结果下发供 rc 明细引用。
+    path_diagnostics = _normalize_path_context(context)
 
     # 3. 校验 required_context
     missing = _validate_context(cfg.get("required_context", []), context)
@@ -356,6 +428,10 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
         "warns": warns,
         "manual": manual,
     }
+    # 池 #613: rc=1 时输出「哪个 check + 找不到哪个文件 + 尝试过的路径」
+    if path_diagnostics:
+        result["path_diagnostics"] = path_diagnostics
+        _attach_path_diagnostics(result, path_diagnostics)
     # Task1879-B（池#352 用户裁定）: persist 场景 WARN 产生即入池 + pass 自动销账。
     # 先只 persist 域（任务书禁止过度泛化到其他场景）。fail-open：台账失败不影响 gate 结果。
     if scenario == "persist":
@@ -471,4 +547,18 @@ if __name__ == "__main__":
         pass  # nexusos_xdr 不可达（纯 gate 包独立部署）——无注入场景照旧
     result = check(scenario, context, agent=_cli_agent)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    sys.exit(0 if result["passed"] else 1)
+    if not result["passed"]:
+        # 池 #613: rc=1 的人读明细（哪个 check + 文件 + 尝试过的路径），JSON 仍保留机器可读
+        print(f"[gate] {scenario} 未通过——失败项:", file=sys.stderr)
+        for item in result.get("failures", []):
+            if item.get("status") == "fail":
+                print(f"  - {item.get('id')} {item.get('name')}: {item.get('detail')}", file=sys.stderr)
+        for key, info in (result.get("path_diagnostics") or {}).items():
+            state = "存在" if info.get("exists") else "不存在"
+            print(
+                f"  [路径] {key}: 输入={info.get('input')!r} → 解析={info.get('resolved')}（{state}）"
+                f" 尝试过: {' / '.join(info.get('attempted') or [])}",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+    sys.exit(0)

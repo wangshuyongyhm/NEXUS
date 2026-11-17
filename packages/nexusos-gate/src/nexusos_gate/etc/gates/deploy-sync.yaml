@@ -1,0 +1,43 @@
+# deploy-sync 场景门禁 — 体系变更后检查部署文档是否同步
+# 触发:体系变更动作(dispatch完成/done回调/init)后 Agent 主动调 gate_check(scenario="deploy-sync")
+# 全 WARN 级:不阻断变更,只提醒该更新的部署文档
+# 设计:可机器生成的(requirements/schema/plist)告警"该重生";需语义的(总手册)告警"该人工更新"
+version: 1
+scenario: deploy-sync
+description: 部署文档同步检查(体系变更后提醒更新 requirements/schema/plist/Agent配置)
+required_context:
+  - {name: vault, desc: "Vault根路径", required: true}
+  - {name: changed, desc: "本次变更的类型列表", required: true}  # 如 ["pg_schema","plist","deps","agent_config"]
+items:
+  # DS1: PG schema 变了 → schema.sql 是否同步
+  - id: DS1
+    name: schema.sql 同步
+    auto: true
+    severity: WARN
+    check:
+      type: deploy_synced
+      artifact: schema_sql
+      vault: "{vault}"
+      changed: "{changed}"
+
+  # DS2: plist 变了 → etc/plists/ 备份是否同步
+  - id: DS2
+    name: plist 备份同步
+    auto: true
+    severity: WARN
+    check:
+      type: deploy_synced
+      artifact: plist_backup
+      vault: "{vault}"
+      changed: "{changed}"
+
+  # DS3: 装了新依赖 → requirements.txt 是否同步
+  - id: DS3
+    name: requirements.txt 同步
+    auto: true
+    severity: WARN
+    check:
+      type: deploy_synced
+      artifact: requirements
+      vault: "{vault}"
+      changed: "{changed}"

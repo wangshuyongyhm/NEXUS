@@ -109,9 +109,12 @@ _START_TS = time.time()
 _HEAVY_SEM = threading.BoundedSemaphore(8)
 try:
     import psycopg2.errors as psycopg2_errors
-except Exception:  # 无 psycopg2 环境（不应发生）时用哑类保 QueryCanceled 分支永不命中
+except Exception:  # 无 psycopg2 环境（不应发生）时用哑类保异常分支永不命中
     class psycopg2_errors:  # type: ignore
         class QueryCanceled(Exception):
+            pass
+
+        class CheckViolation(Exception):
             pass
 
 
@@ -839,6 +842,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if not _HEAVY_SEM.acquire(blocking=False):
             self._json(503, {"error": "busy: 重请求并发已满,请退避重试", "hint": "retry-after 1s"})
             return
+        kb = None
         try:
             kb = _get_kb(agent_id)
 
@@ -859,6 +863,46 @@ class APIHandler(BaseHTTPRequestHandler):
                 source_agent=agent_id,  # Task 284 P0-A: 显式传 POST body 的 agent_id（_get_kb 全局实例 self.agent_id 永远是 "ac"）
                 identity_producer="api_server:POST /knowledge",  # Task1524: 身份登记 producer
             )
+        except psycopg2_errors.CheckViolation:
+            # 2611111764: 非法 knowledge_type 等约束违反——原直穿冒泡，curl 收
+            # Empty reply（exit 52）无任何状态码（zcode 11:46/kimi 13:0x 三例根因）。
+            # 白名单真源=PG 约束 knowledge_type_whitelist；此处只转 400 不另建清单。
+            import sys
+            print(f"[2611111764] /knowledge 约束违反: ktype={ktype}", file=sys.stderr, flush=True)
+            if kb is not None:
+                # 对抗审查反例3：add_knowledge 对 CheckViolation 不 rollback（仅
+                # UniqueViolation 有），线程本地缓存连接留 aborted 态会毒化该线程后续
+                # 写入——边界处补 rollback
+                try: kb._get_conn().rollback()
+                except Exception: pass  # silent: rollback 失败即等僵尸 ping 重连
+            self._json(400, {
+                "error": f"knowledge_type 非法: {ktype!r}（违反 PG 约束 knowledge_type_whitelist）",
+                "legal": ["document", "experience", "pitfall", "verification", "finding",
+                          "counterexample", "memory", "decision", "user_profile", "baseline"],
+            })
+            return
+        except psycopg2_errors.QueryCanceled:
+            # 2611111764: 语句超时（过载）——与 /search 1822 同语义：快败 503 不重试
+            import sys
+            print(f"[2611111764] /knowledge 语句超时: title={title[:40]}", file=sys.stderr, flush=True)
+            if kb is not None:
+                try: kb._get_conn().rollback()
+                except Exception: pass  # silent: 同上，防 aborted 毒化
+            self._json(503, {"error": "busy: 写入语句超时(过载保护),请退避重试", "hint": "retry-after 1s"})
+            return
+        except Exception as e:
+            # 2611111764: HTTP 边界兜底（#32518 处方）——其余异常（PG 断连/embed 失败
+            # 等）原样 Empty reply 断连，现返 500 JSON + 服务端日志留痕
+            import traceback
+            import sys
+            print(f"[2611111764] /knowledge 内部错误: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
+            if kb is not None:
+                try: kb._get_conn().rollback()
+                except Exception: pass  # silent: 同上，防 aborted 毒化
+            self._json(500, {"error": f"内部错误: {type(e).__name__}"})
+            return
         finally:
             _HEAVY_SEM.release()
 

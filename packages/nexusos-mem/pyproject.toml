@@ -30,7 +30,7 @@ full = [
 
 # 开源仓库落位（M1 脱敏建仓）后更新为真实主页；切片器不再补注（单一真源）
 [project.urls]
-Homepage = "https://github.com/nexus-family/nexusos-mem"
+Homepage = "https://github.com/wangshuyongyhm/nexusos-mem"
 
 [tool.setuptools.packages.find]
 where = ["src"]

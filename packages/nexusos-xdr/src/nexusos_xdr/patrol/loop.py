@@ -872,37 +872,69 @@ def _start_patrol_thread(agent: "AgentBase", task_id: str, stop_event,
                     # 小弟 done 回调现在走 POST :19998/callback → 直接写 task_state →
                     # 下一轮 patrol 循环 load_state 检测到 DONE 即退出（§2 输出检测也会兜底）。
 
-                    # §1.6 池#238 重投半边（Task1703 件二）：dispatch 后 N 秒仍
-                    # 无小弟回调 → 自动重投一次。回执判据=callbacks 空（⚠️不能用
-                    # started is None——update_status(RUNNING) 在 send 前就盖
-                    # started 时间戳，该字段是 dispatch 侧时刻非小弟回执，恒非
-                    # None=死条件）。只重投一次（once_flag）；warning 落账不发
-                    # alert（1589 告警半边语义不动——重投 180s 早于告警 10min，
-                    # 成功则告警自然不触发，不重复报）。草稿滞留探测
+                    # §1.6 池#238 重投（Task1703 件二）→ P0-1 ACK 门控升级
+                    # （2611111762）：盲重投（180s 无回调即重投）升级为回执门控
+                    # ——「ACK 窗无回执 且 无进度物证」才重投；已读未回执的任务
+                    # 不再被双投（#615 探针实证双投消费 2 遍）。
+                    # 旧任务（无 ack 字段，本部署窗口内混跑）走 legacy 判据
+                    # （callbacks 空 + 180s，once_flag 防重）。草稿滞留探测
                     # （_input_has_draft）证据随 warning 落账供审计。
 
                     try:
+                        from nexusos_xdr import ack as _ack_mod
                         _st238 = state or {}
-                        if (
+                        _has_ack_fields = "ack" in _st238
+                        if _has_ack_fields:
+                            _act, _why = _ack_mod.ack_timeout_action(_st238, time.time())
+                        elif (
                             _st238.get("status") == "RUNNING"
                             and not _st238.get("callbacks")
                             and elapsed >= DELIVERY_RESEND_SEC
-                            and task_state.once_flag(task_id, "delivery_resent")
                         ):
+                            _act, _why = "retry", f"legacy 判据（{DELIVERY_RESEND_SEC}s 无回调）"
+                        else:
+                            _act, _why = "skip", "legacy 条件不满足"
+                        if _act == "retry" and task_state.once_flag(task_id, "delivery_resent"):
                             _dp238 = str(_st238.get("dispatched_path") or task_path)
                             _draft238 = False
                             try:
                                 _draft238 = agent._input_has_draft(_dp238)
                             except Exception:
                                 pass
+                            _key238 = _ack_mod.register_delivery(task_id)  # 同键重投+新 deadline
                             _ok238 = agent.send_task(_dp238, task_id)
                             _w238 = (
-                                f"[delivery-resend] {task_id} 派发后 {DELIVERY_RESEND_SEC}s "
-                                f"无小弟回调（草稿滞留={_draft238}），已自动重投一次："
-                                f"{'已发出' if _ok238 else '发送失败'}（池#238 件二 Task1703）"
+                                f"[delivery-resend] {task_id} ACK 窗超时（{_why}，"
+                                f"key={_key238}，草稿滞留={_draft238}），已重投："
+                                f"{'已发出' if _ok238 else '发送失败'}（池#238 升级 P0-1 2611111762）"
                             )
                             task_state.append_warning(task_id, _w238)
                             logger.warning(_w238)
+                        elif _act == "fail":
+                            # P1-B4 (Task 2611111774): fail 终态化前重读真源——ack 超窗
+                            # 判定基于循环开头快照，与迟到 done 存在窗口竞争（1770 B4）。
+                            # 状态机本身已硬拦 DONE→FAILED（VALID_TRANSITIONS 抛
+                            # ValueError 被外层 debug 吞）——本守卫把「跳过」从隐式吞
+                            # 升级为显式 info 留痕，并收窄 check-then-set 窗口。
+                            _cur_b4 = task_state.load_state(task_id) or {}
+                            if _cur_b4.get("status") not in ("RUNNING", "PENDING"):
+                                logger.info(
+                                    f"[patrol] {task_id} status={_cur_b4.get('status')} 非在途"
+                                    f"——跳过 delivery_failed 终态化（B4 守卫，1770）")
+                            else:
+                                _wfail = f"[delivery-failed] {task_id} 两投均无回执无物证——投递失败终态（P0-1 2611111762）"
+                                task_state.update_status(task_id, "FAILED",
+                                                         error=_wfail,
+                                                         end_reason="delivery_failed")
+                                task_state.append_warning(task_id, _wfail)
+                                _notify_caller("FAILED", {"method": "delivery_failed"})
+                        elif _act == "late" and task_state.once_flag(task_id, "ack_late"):
+                            _ack238 = dict(_st238.get("ack") or {})
+                            _ack238["state"] = "late"  # 落定：后续轮 ack_timeout_action 直接 skip
+                            task_state.update_field(task_id, "ack", _ack238)
+                            _wlate = f"[ack-late] {task_id} 超 ACK 窗但有回调物证——执行已开始，不重投（{_why}）"
+                            task_state.append_warning(task_id, _wlate)
+                            logger.warning(_wlate)
                     except Exception as _e238:
                         logger.debug(f"[patrol] {task_id} 重投探测异常（不阻塞）: {_e238}")
                     # 2. 产出文件 + 空闲 → 主动标 DONE（移到超时检查前，防边界竞态）

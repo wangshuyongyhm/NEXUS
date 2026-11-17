@@ -20,7 +20,7 @@ dependencies = []
 nexus = "nexusos_common.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/nexus-family/nexusos-common"
+Homepage = "https://github.com/wangshuyongyhm/nexusos-common"
 
 [tool.setuptools.packages.find]
 where = ["src"]

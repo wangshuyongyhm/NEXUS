@@ -5,31 +5,33 @@
 机制（池 #352 用户裁定 B）：
   1. persist gate 结果含 fail 且 severity=WARN 的项 → 在 06-Memory/未决问题池.md
      「gate 自动登记」段追加一行（编号走 pool-next-id.sh 原子取号 + --check 防占）。
-  2. 同 agent + 同 tag + 同关键（目录/项名）已有未闭环行 → 不重复登记。
-  3. 后续 persist 同项 pass 时 → 池内该 agent 该项的未闭环行自动标闭环
+  2. 同 tag + 同关键（目录/项名）已有未闭环 gate 行 → 不重复登记（#723 起跨 agent 去重）。
+  3. 后续任意 agent persist 同项 pass 时 → 池内同 tag+关键 的未闭环 gate 行自动标闭环
      （状态 待办→✅，备注追加自动闭环注记；P4 额外要求目录 ∈ 本次 touched_dirs）。
+     人工行/非 gate 告警行类型列不是 gate告警，不会被误闭环（#723 缺陷③放宽判据）。
 
-写入纪律（池 #124 前科）：
-  - 登记=行级追加（open('a')），禁全文重写；
-  - 销账必须改已有行，采用「读行→只动目标行→临时文件原子 rename」，并加 flock 串行化。
+写入纪律（池 #124 前科 + #723 统一通道）：
+  - 登记与销账全部走 pool_write_channel（= pool-safe-write.sh 同款 .pool-write.lockdir
+    mkdir 锁 + 写后行数校验 + ~/.pool-write.log 写痕），锁只此一把，不再 flock 旁路直写；
+  - 登记=行级追加，销账=锁窗口内「读行→只动目标行→原子 replace」（并发不互吞行）。
 
 gate_engine.check() 在 persist 场景结果汇总后调用 sync()（fail-open）。
 """
-import fcntl
 import os
-import re
 import subprocess
 import sys
-import tempfile
+
 from datetime import datetime
 from pathlib import Path
+
+from nexusos_gate import pool_write_channel
 
 POOL_REL = os.path.join("06-Memory", "未决问题池.md")
 SECTION_HEADER = "## gate 自动登记（persist 台账，Task1879-B）"
 TABLE_HEADER = ("| # | 问题 | 类型 | 提出时间 | 提出会话 | 状态 | 备注 |\n"
                 "|---|------|------|----------|----------|------|------|\n")
 OPEN_STATUS = "待办"
-LOCK_NAME = ".pool-ledger.lock"
+GATE_ROW_TYPE = "| gate告警 |"  # gate 自动登记行的类型列专属标记（#723 闭环判据：防误闭环人工行）
 
 
 def _next_id_script(vault_root: str) -> Path:
@@ -91,56 +93,55 @@ def _load_lines(pool: Path) -> list:
     return pool.read_text(encoding="utf-8").splitlines(keepends=True)
 
 
-def _is_open_row_for(line: str, tag: str, key: str, agent: str) -> bool:
-    return (line.startswith("|") and tag in line and key in line
-            and f"| {OPEN_STATUS} |" in line and f"{agent}-gate" in line)
+def _is_open_row_for(line: str, tag: str, keys: list = None) -> bool:
+    """未闭环 gate 行判据（#723 缺陷③：放宽为跨 agent）。
+
+    行首 | + 同 tag + 待办 + 类型列=gate告警；keys 非空时还要求行内含任一 key
+    （P4 的目录锚定）。登记行「提出会话=<agent>-gate」只作溯源，不再参与判定——
+    登记 Agent 收工后其他 Agent 的 pass 也能闭环其遗留行（池#706/#707/#710
+    三行人工收口的根因）。人工行/普通问题行类型列不是 gate告警，天然不匹配。
+    """
+    if not (line.startswith("|") and tag in line
+            and f"| {OPEN_STATUS} |" in line and GATE_ROW_TYPE in line):
+        return False
+    return not keys or any(k in line for k in keys)
 
 
 def _append_rows(pool: Path, rows: list):
-    """行级追加（含段头补齐），flock 串行化。"""
-    lock_path = pool.parent / LOCK_NAME
-    with open(lock_path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    """登记=行级追加（含段头补齐），写走统一通道（#723 缺陷②）。
+
+    持 .pool-write.lockdir（与 pool-safe-write.sh 互斥互通）+ 写后校验 +
+    ~/.pool-write.log 写痕——P19 对账自然通过，gate 不再自触发 WARN（池#710）。
+    """
+    with pool_write_channel.pool_write_lock(pool):
         lines = _load_lines(pool)
-        need_header = not any(l.rstrip() == SECTION_HEADER for l in lines)
-        with open(pool, "a", encoding="utf-8") as f:
-            if need_header:
-                if lines and lines[-1].strip():
-                    f.write("\n")
-                f.write(f"{SECTION_HEADER}\n\n{TABLE_HEADER}")
-            for r in rows:
-                f.write(r)
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        buf = []
+        if not any(l.rstrip() == SECTION_HEADER for l in lines):
+            if lines and lines[-1].strip():
+                buf.append("\n")
+            buf.append(f"{SECTION_HEADER}\n\n{TABLE_HEADER}")
+        buf.extend(rows)
+        pool_write_channel.commit_write(pool, "".join(buf), "append")
 
 
-def _close_rows(pool: Path, tag: str, agent: str, keys: list) -> int:
-    """把匹配 tag+agent+keys 的未闭环行标闭环（原子 rename 写回）。返回闭环行数。"""
-    lock_path = pool.parent / LOCK_NAME
+def _close_rows(pool: Path, tag: str, keys: list) -> int:
+    """把匹配 tag+keys 的未闭环 gate 行标闭环（跨 agent，#723 缺陷③）。
+
+    「读→改→写」整段在统一通道锁窗口内完成（并发互关不互吞行，#723 缺陷②），
+    replace 落盘带写痕。返回闭环行数。
+    """
     closed = 0
-    with open(lock_path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with pool_write_channel.pool_write_lock(pool):
         lines = _load_lines(pool)
-        if not lines:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            return 0
         today = datetime.now().strftime("%Y-%m-%d")
-        changed = False
         for i, line in enumerate(lines):
-            if not (line.startswith("|") and tag in line
-                    and f"| {OPEN_STATUS} |" in line and f"{agent}-gate" in line):
-                continue
-            if keys and not any(k in line for k in keys):
+            if not _is_open_row_for(line, tag, keys):
                 continue
             lines[i] = (line.replace(f"| {OPEN_STATUS} |", "| ✅ |", 1).rstrip("\n")
                         + f"（{today} persist gate pass 自动闭环）\n")
             closed += 1
-            changed = True
-        if changed:
-            fd, tmp = tempfile.mkstemp(dir=str(pool.parent), prefix=".pool-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            os.replace(tmp, pool)
-        fcntl.flock(lock, fcntl.LOCK_UN)
+        if closed:
+            pool_write_channel.commit_write(pool, "".join(lines), "replace")
     return closed
 
 
@@ -173,9 +174,9 @@ def sync(context: dict, result: dict, agent: str = "") -> dict:
         else:
             subjects = [(f"{name}（{detail[:80]}）", name)]
         for subject, key in subjects:
-            if any(_is_open_row_for(l, tag, key, agent) for l in lines) or \
-               any(_is_open_row_for(l, tag, key, agent) for l in new_rows):
-                continue  # 去重：同 agent+同 tag+同 key 未闭环行已在池
+            if any(_is_open_row_for(l, tag, [key]) for l in lines) or \
+               any(_is_open_row_for(l, tag, [key]) for l in new_rows):
+                continue  # 去重：同 tag+同 key 未闭环 gate 行已在池（跨 agent，#723）
             nid = _next_id(vault_root)
             new_rows.append(_row(nid, tag, subject, agent, "自动登记 by gate_engine"))
             registered += 1
@@ -189,7 +190,7 @@ def sync(context: dict, result: dict, agent: str = "") -> dict:
             continue
         tag = f"[gate-{r.get('id', '?')}]"
         keys = list(touched) if r.get("id") == "P4" else []
-        closed += _close_rows(pool, tag, agent, keys)
+        closed += _close_rows(pool, tag, keys)
     return {"registered": registered, "closed": closed}
 
 
