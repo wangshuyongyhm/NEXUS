@@ -2,10 +2,655 @@
 # 规则：显式枚举文件，不用目录通配——新增文件默认不同步。
 # 执行：MAIN_REPO=<主仓路径> tools/sync-scrub.py --manifest（先过内容闸再拷贝）。
 # 1558 已泄露集合（keys.json / MEM 快照 / task 密钥文件）永久黑名单，永不在此列。
+#
+# ── A3a 填充（task/2611172038，池 #616）设计依据 ─────────────────────────
+# 闸①(1575 sync-strategy §2): 文件级显式枚举，宁窄勿宽。
+# 分叉不列（1976 拍板/发布配置域）: xdr agents/* 私 fleet 21 文件、各包 pyproject.toml、
+#   mem/xdr README.md（OSS 门面改写域）、xdr agents/__init__.py（OSS 公开层）。
+# 私敏剔除(scrub 实拦): gates/data/external-disk-paths.yaml(个人卷标×7)、
+#   _checks/relocate_pointer_solid.py(硬编码 stzb 资产路径)。
+# tests 口径: 交集既有 tests 保留(common 6 + gate _checks/tests 7，1949 已开源先例)，
+#   主仓新增 tests 不扩面(A3b 决策)。
+# 改名映射: 主仓 examples-src/gates/* → 公开仓 examples/gates/*。
+# 内容闸豁免见 tools/sync-scrub.py FILE_EXEMPT（逐文件审计理由）。
 
 version: 1
-# 当前骨架期为设计占位——真源迁移启动时逐项填入：
-# - src: 05-System/自动化脚本/pypi/nexus-mem/src/nexus_mem/shared.py
-#   dst: packages/nexus-mem/src/nexus_mem/shared.py
-#   rename: null
-entries: []
+entries:
+
+  # ── nexusos-common ──
+  - src: 05-System/自动化脚本/pypi/nexusos-common/README.md
+    dst: packages/nexusos-common/README.md
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/__init__.py
+    dst: packages/nexusos-common/src/nexusos_common/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/anchors.py
+    dst: packages/nexusos-common/src/nexusos_common/anchors.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/cli.py
+    dst: packages/nexusos-common/src/nexusos_common/cli.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/lint.py
+    dst: packages/nexusos-common/src/nexusos_common/lint.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/lint_patterns.py
+    dst: packages/nexusos-common/src/nexusos_common/lint_patterns.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/py.typed
+    dst: packages/nexusos-common/src/nexusos_common/py.typed
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/update_check.py
+    dst: packages/nexusos-common/src/nexusos_common/update_check.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/__init__.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/config.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/config.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/doctor.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/doctor.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/factsheet.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/factsheet.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/provision.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/provision.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/src/nexusos_common/wizard/scan.py
+    dst: packages/nexusos-common/src/nexusos_common/wizard/scan.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/conftest.py
+    dst: packages/nexusos-common/tests/conftest.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/test_anchors.py
+    dst: packages/nexusos-common/tests/test_anchors.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/test_lint.py
+    dst: packages/nexusos-common/tests/test_lint.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/test_port_coherence.py
+    dst: packages/nexusos-common/tests/test_port_coherence.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/test_update_check.py
+    dst: packages/nexusos-common/tests/test_update_check.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-common/tests/test_wizard.py
+    dst: packages/nexusos-common/tests/test_wizard.py
+    rename: null
+  # ── nexusos-gate ──
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/.gitignore
+    dst: packages/nexusos-gate/.gitignore
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/README.md
+    dst: packages/nexusos-gate/README.md
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/doc_symbol_refs.py
+    dst: packages/nexusos-gate/src/nexusos_gate/doc_symbol_refs.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/README.md
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/README.md
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/config_key_refs.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/config_key_refs.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/doc_consistency.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/doc_consistency.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/e2e-paths.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/e2e-paths.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/checks/examples/persist_pool_ledger.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/checks/examples/persist_pool_ledger.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/__init__.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_gitcmd.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_gitcmd.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vault_root.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vault_root.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_workspace_root.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_workspace_root.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/adversarial_review.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/adversarial_review.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/branch_merged_main.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/branch_merged_main.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/codegraph_wrapper.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/codegraph_wrapper.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/command.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/command.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/comment_out_detection.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/comment_out_detection.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/complexity_aware.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/complexity_aware.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/concurrency_declared.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/concurrency_declared.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/config_key_refs.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/config_key_refs.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deletion_mentioned.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deletion_mentioned.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/doc_consistency.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/doc_consistency.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/done_ack.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/done_ack.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/e2e_suite_evidence.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/e2e_suite_evidence.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/external_change_traced.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/external_change_traced.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/field_check.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/field_check.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/file_exists.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/file_exists.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/file_size.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/file_size.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/files_exist.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/files_exist.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/git_diff_scope.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/git_diff_scope.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/grep_in_diff.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/grep_in_diff.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/line_count.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/line_count.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/md_updated_today.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/md_updated_today.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/outcome_backfill.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/outcome_backfill.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/pool_rows_flipped.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/pool_rows_flipped.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/pool_write_via_wrapper.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/pool_write_via_wrapper.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/report_schema.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/report_schema.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/step_completeness.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/step_completeness.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/task_subgraph_connected.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/task_subgraph_connected.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/test_readme_synced_p4.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/test_readme_synced_p4.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/conftest.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/conftest.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_adversarial_review.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_adversarial_review.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_concurrency_declared.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_concurrency_declared.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_files_exist.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_files_exist.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_git_diff_parsers.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_git_diff_parsers.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_oss_checks.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_oss_checks.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_verification_evidence.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/tests/test_verification_evidence.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_evidence.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_evidence.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_evidence_anchor.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_evidence_anchor.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_level_marked.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verification_level_marked.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verify_doc_consistency_20260818.md
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/verify_doc_consistency_20260818.md
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/workspace_residue.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/workspace_residue.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/worktree_contract.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/worktree_contract.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/launchd_registry_verify.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/launchd_registry_verify.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/gate_engine.py
+    dst: packages/nexusos-gate/src/nexusos_gate/gate_engine.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/persist_pool_ledger.py
+    dst: packages/nexusos-gate/src/nexusos_gate/persist_pool_ledger.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/predone.py
+    dst: packages/nexusos-gate/src/nexusos_gate/predone.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/etc/audit_checks.py
+    dst: packages/nexusos-gate/etc/audit_checks.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/examples-src/gates/doc_release.yaml
+    dst: packages/nexusos-gate/examples/gates/doc_release.yaml
+    rename: examples-src→examples
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/examples-src/gates/minimal.yaml
+    dst: packages/nexusos-gate/examples/gates/minimal.yaml
+    rename: examples-src→examples
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/examples-src/gates/pre_commit.yaml
+    dst: packages/nexusos-gate/examples/gates/pre_commit.yaml
+    rename: examples-src→examples
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/README.md
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/README.md
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vaultlink.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vaultlink.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_archive_updated.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_archive_updated.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_version_synced.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_version_synced.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deploy_synced.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deploy_synced.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/experiences_present.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/experiences_present.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/external_disk_ready.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/external_disk_ready.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/impact_keys.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/impact_keys.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/mem_queried.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/mem_queried.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/no_new_broken_links.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/no_new_broken_links.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/outcome_filled.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/outcome_filled.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/parent_anchors.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/parent_anchors.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/profile_queried.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/profile_queried.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/readme_synced.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/readme_synced.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/session_log_updated.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/session_log_updated.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/vault_broken_trend.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/vault_broken_trend.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/code.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/code.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/deploy-sync.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/deploy-sync.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/dispatch.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/dispatch.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/done.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/done.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/gate-triggers.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/gate-triggers.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/init.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/init.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/loop_complete.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/loop_complete.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/loop_start.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/loop_start.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/persist.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/persist.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/state_transition.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/state_transition.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/user_decision.yaml
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/user_decision.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/pool_write_channel.py
+    dst: packages/nexusos-gate/src/nexusos_gate/pool_write_channel.py
+    rename: null
+  # ── nexusos-mem ──
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/.gitignore
+    dst: packages/nexusos-mem/.gitignore
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/__init__.py
+    dst: packages/nexusos-mem/src/nexusos_mem/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/_vault_env.py
+    dst: packages/nexusos-mem/src/nexusos_mem/_vault_env.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/algorithms.py
+    dst: packages/nexusos-mem/src/nexusos_mem/algorithms.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/api_server.py
+    dst: packages/nexusos-mem/src/nexusos_mem/api_server.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/apply_honesty.py
+    dst: packages/nexusos-mem/src/nexusos_mem/apply_honesty.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/cognitive_checks.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/cognitive_checks.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/context_dimensions.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/context_dimensions.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/intent_packs.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/intent_packs.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/project_mapping.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/project_mapping.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/project_rules.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/project_rules.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/config/term_dict.yaml
+    dst: packages/nexusos-mem/src/nexusos_mem/config/term_dict.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/context_capture.py
+    dst: packages/nexusos-mem/src/nexusos_mem/context_capture.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/embed_corpus.py
+    dst: packages/nexusos-mem/src/nexusos_mem/embed_corpus.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/embed_server.py
+    dst: packages/nexusos-mem/src/nexusos_mem/embed_server.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/env_scrub.py
+    dst: packages/nexusos-mem/src/nexusos_mem/env_scrub.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/hyde.py
+    dst: packages/nexusos-mem/src/nexusos_mem/hyde.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/identity.py
+    dst: packages/nexusos-mem/src/nexusos_mem/identity.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/nexus_mem_utils.py
+    dst: packages/nexusos-mem/src/nexusos_mem/nexus_mem_utils.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/parser.py
+    dst: packages/nexusos-mem/src/nexusos_mem/parser.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/provenance.py
+    dst: packages/nexusos-mem/src/nexusos_mem/provenance.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/relation.py
+    dst: packages/nexusos-mem/src/nexusos_mem/relation.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/rerank_server.py
+    dst: packages/nexusos-mem/src/nexusos_mem/rerank_server.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/backfill_citation_relations.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/backfill_citation_relations.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/backfill_identity.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/backfill_identity.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/backfill_provenance.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/backfill_provenance.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/graph_slice.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/graph_slice.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/knowledge_dig.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/knowledge_dig.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/refresh_readmodel.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/refresh_readmodel.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/scripts/semantic_pilot.py
+    dst: packages/nexusos-mem/src/nexusos_mem/scripts/semantic_pilot.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/search.py
+    dst: packages/nexusos-mem/src/nexusos_mem/search.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/shadow_match.py
+    dst: packages/nexusos-mem/src/nexusos_mem/shadow_match.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/shared.py
+    dst: packages/nexusos-mem/src/nexusos_mem/shared.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/test_credential_guard_1948.py
+    dst: packages/nexusos-mem/src/nexusos_mem/test_credential_guard_1948.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/tokenize_zh.py
+    dst: packages/nexusos-mem/src/nexusos_mem/tokenize_zh.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/config-examples/project_mapping.yaml
+    dst: packages/nexusos-mem/config-examples/project_mapping.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/config-examples/project_rules.yaml
+    dst: packages/nexusos-mem/config-examples/project_rules.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/config-examples/term_dict.yaml
+    dst: packages/nexusos-mem/config-examples/term_dict.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/scripts/backfill_tokens_zh.py
+    dst: packages/nexusos-mem/scripts/backfill_tokens_zh.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/sql/001_knowledge_identity.sql
+    dst: packages/nexusos-mem/sql/001_knowledge_identity.sql
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/sql/002_provenance_rel_type.sql
+    dst: packages/nexusos-mem/sql/002_provenance_rel_type.sql
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/sql/003_readmodel.sql
+    dst: packages/nexusos-mem/sql/003_readmodel.sql
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/sql/003_semantic_rel_type.sql
+    dst: packages/nexusos-mem/sql/003_semantic_rel_type.sql
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/sql/004_readmodel_edge_constraints.sql
+    dst: packages/nexusos-mem/sql/004_readmodel_edge_constraints.sql
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/skip_rules.py
+    dst: packages/nexusos-mem/src/nexusos_mem/skip_rules.py
+    rename: null
+  # ── nexusos-xdr ──
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/.gitignore
+    dst: packages/nexusos-xdr/.gitignore
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/_mem_compat.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/_mem_compat.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/_vault_deps.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/_vault_deps.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/_vault_env.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/_vault_env.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/broadcast_router.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/broadcast_router.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/callback/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/callback/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/callback/handler.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/callback/handler.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/callback/outcome_autofill.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/callback/outcome_autofill.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/cli.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/cli.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/cred_reaper.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/cred_reaper.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/credential.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/credential.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/dispatch/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/dispatch/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/dispatch/main.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/dispatch/main.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/dispatchd.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/dispatchd.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/exp_injector.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/exp_injector.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/fault_http_server.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/fault_http_server.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/guards.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/guards.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/agent_prompt_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/agent_prompt_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/broadcast_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/broadcast_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/commit_msg_advisor.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/commit_msg_advisor.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/completion_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/completion_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/dispatch_waitcallback_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/dispatch_waitcallback_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/dup_window_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/dup_window_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/interaction_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/interaction_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/mem_first_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/mem_first_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/oplog_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/oplog_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/selfcheck_evidence_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/selfcheck_evidence_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/state_transition_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/state_transition_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/waitcallback_bg_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/waitcallback_bg_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/httpapi/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/httpapi/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/httpapi/routes.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/httpapi/routes.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/layer2_calibrate.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/layer2_calibrate.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/mcp_auth.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/mcp_auth.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/mcp_server.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/mcp_server.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/needdecision_notify.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/needdecision_notify.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/notify_push.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/notify_push.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/pair_semantics.json
+    dst: packages/nexusos-xdr/src/nexusos_xdr/pair_semantics.json
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/patrol/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/patrol/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/patrol/loop.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/patrol/loop.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/patrol/state.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/patrol/state.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/presence/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/presence/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/presence/routes.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/presence/routes.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/session_state.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/session_state.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/spill.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/spill.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/task_state.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/task_state.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/tools/__init__.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/tools/__init__.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/tools/registry.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/tools/registry.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/ack.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/ack.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/config.example.yaml
+    dst: packages/nexusos-xdr/src/nexusos_xdr/config.example.yaml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/p02_hardblock.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/p02_hardblock.py
+    rename: null

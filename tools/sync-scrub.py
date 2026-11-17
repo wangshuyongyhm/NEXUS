@@ -19,7 +19,8 @@ OSS_ROOT = Path(__file__).resolve().parent.parent
 
 # 内容级密钥模式（1578 S2 补全五式：AKIA/ghp_/AIza/xoxb/eyJ + 原有）
 SECRET_PATTERNS = [
-    (r"sk-[a-zA-Z0-9_-]{8,}", "OpenAI 式 API key (sk-)"),
+    # A3a：(?<![a-zA-Z0-9_-]) 前界——防 task-307/desk-1 类子串误报（embed_server docstring 实证）
+    (r"(?<![a-zA-Z0-9_-])sk-[a-zA-Z0-9_-]{8,}", "OpenAI 式 API key (sk-)"),
     (r"AKIA[A-Z0-9]{16}", "AWS Access Key (AKIA)"),
     (r"ghp_[a-zA-Z0-9]{20,}", "GitHub PAT (ghp_)"),
     (r"AIza[a-zA-Z0-9_-]{20,}", "Google API key (AIza)"),
@@ -28,7 +29,9 @@ SECRET_PATTERNS = [
     (r"BEGIN [A-Z ]*PRIVATE KEY", "PEM 私钥"),
     (r"(?i)(password|passwd|secret)\s*[:=]\s*['\"]?\S{6,}", "口令键值对"),
     (r"(?i)(token|api[_-]?key)\s*[:=]\s*['\"]?[a-zA-Z0-9_-]{16,}", "token/key 键值对"),
-    (r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "IP 地址（需人工确认公私）"),
+    # A3a：回环/any 地址豁免（本机服务默认，零隐私；monorepo README 自身即用
+    # 127.0.0.1:19998）。私网段（10./192.168./172.16-31.）仍拦——内网拓扑敏感。
+    (r"\b(?!127\.0\.0\.1\b|0\.0\.0\.0\b)\d{1,3}(?:\.\d{1,3}){3}\b", "IP 地址（需人工确认公私）"),
 ]
 # 个人痕迹模式（中性化闸）
 PERSONAL_PATTERNS = [
@@ -38,6 +41,14 @@ PERSONAL_PATTERNS = [
 
 # 白名单后缀内豁免（占位文档允许提到模式本身）
 DOC_WHITELIST = {"sync-strategy.md", "NOTICE", "sync-scrub.py"}
+# A3a 文件级豁免（逐文件审计理由；1949 切片均已公开同款先例）：
+# - test_lint.py: 个人路径形态是 lint 检测器的测试 fixture（monorepo 同款已开源）
+# - test_credential_guard_1948.py: 合成密钥夹具，带 gitleaks:allow 标注（测凭据检测器）
+# - provision.py: POSTGRES_PASSWORD: nexus_local 为 dev compose 默认（开源惯例）
+# - credential.py: 命中均为代码级 secrets API 调用（token_hex/变量传递），非字面密钥
+FILE_EXEMPT = {
+    "test_lint.py", "test_credential_guard_1948.py", "provision.py", "credential.py",
+}
 
 
 def scan_file(path: Path) -> list[str]:
@@ -46,7 +57,7 @@ def scan_file(path: Path) -> list[str]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return [f"读取失败: {e}"]
-    if path.name in DOC_WHITELIST:
+    if path.name in DOC_WHITELIST or path.name in FILE_EXEMPT:
         return []
     for pat, label in SECRET_PATTERNS + PERSONAL_PATTERNS:
         for m in re.finditer(pat, text):
