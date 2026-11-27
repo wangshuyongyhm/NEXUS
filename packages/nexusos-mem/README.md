@@ -18,9 +18,9 @@
 最小安装（纯 FTS 检索，不装向量组件）：
 
 ```bash
-# 发布至 PyPI 前：本地路径安装（仓库根目录执行；三包目录并列时同命令安装三件套）
-pip install ./nexusos-mem
-pip install ./nexusos-gate ./nexusos-mem ./nexusos-xdr   # 三件套一条命令（1597 干净 venv 实证口径）
+# 四个包都不在 PyPI 上，从源码装。nexusos-common 不在这三个包目录里——从开源主仓的 packages/ 目录取：
+pip install ./nexusos-mem                                   # 单装 mem（common 要先装：pip install <主仓>/packages/nexusos-common）
+pip install <主仓>/packages/nexusos-common ./nexusos-gate ./nexusos-mem ./nexusos-xdr   # 四包一条命令（1.2.0 干净 venv 实证：xdr 1.2.0 声明依赖 gate>=1.2.0，gate 先于 xdr 解析）
 ```
 
 完整安装（含 BGE-M3 向量 + 精排，体积大，含 torch）：
@@ -34,6 +34,17 @@ pip install "./nexusos-mem[full]"
 PyPI 发布后可用 `pip install nexusos-mem` / `pip install "nexusos-mem[full]"`（当前包未发布，请勿直接照抄）。
 
 `[full]` extras 内容：`sentence-transformers>=2.2`、`torch>=2.0`、`transformers>=4.30`、`FlagEmbedding>=1.2`。BGE 系全部函数级懒 import——装了才启用，不装不报错。
+
+## 建库（必须先做）
+
+本包不随包带建表语句。检索（`/search`）与写入（`/knowledge`）需要数据库里已经有知识库的表；对一个空库调用会报 `UndefinedTable: relation "agents"`。先用开源主仓 `db/` 目录里的结构与迁移建库（主仓 README「快速上手」第 3 步）：
+
+```bash
+createdb nexus_mem
+psql -d nexus_mem -c 'CREATE EXTENSION IF NOT EXISTS vector'
+psql -d nexus_mem -f db/schema.sql
+for f in db/migrations/00*.sql; do psql -d nexus_mem -f "$f"; done
+```
 
 ## 快速上手
 
