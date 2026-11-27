@@ -23,7 +23,7 @@
 import sys as _sys
 from pathlib import Path as _Path
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 # ── 路径自愈（批2 过渡层）────────────────────────────────────────
 # 迁移件仍引用 vault 级共享件（nexus.constants 的 VAULT_ROOT/SHADOW_INDEX_PATH、

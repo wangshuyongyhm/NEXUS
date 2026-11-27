@@ -323,13 +323,13 @@ CHECK_PLUGINS = {**_load_entry_point_checks(), **_load_check_plugins()}
 # 用户 checks.d 场景追加项（$NEXUS_HOME/gate/checks.d/*.yaml）——按需懒读后缓存。
 _USER_CHECKS_D_CACHE: dict = {}
 
-# 2611230882：已下线场景（用户裁定，退役记录见知识库）。传入这些场景名时给明确的
+# 已下线场景（用户裁定 2026-11-24）。传入这些场景名时给明确的
 # 「已下线」说明，而不是「YAML 不存在」——调用方一眼看出是退役不是路径坏了。
 # 单一真源：下线/恢复只改这里。
 RETIRED_SCENARIOS = {
-    "loop_start": "LOOP 启动门禁已于 2026-11-24 下线（任务 2611230882）：23 小时仅 1 次调用、内容是字段长度检查。定义文件在 ~/.Trash/nexus-retire-gates-2611230882/。",
-    "loop_complete": "LOOP 退出门禁已于 2026-11-24 下线（任务 2611230882）：同 loop_start。定义文件在 ~/.Trash/nexus-retire-gates-2611230882/。",
-    "deploy-sync": "部署后文档同步门禁已于 2026-11-24 下线（任务 2611230882）：30 天零运行。定义与专属检查器在 ~/.Trash/nexus-retire-gates-2611230882/。",
+    "loop_start": "LOOP 启动门禁已于 2026-11-24 下线：使用频率极低、内容是字段长度检查。定义文件已移出，可从版本历史恢复。",
+    "loop_complete": "LOOP 退出门禁已于 2026-11-24 下线：同 loop_start。定义文件已移出，可从版本历史恢复。",
+    "deploy-sync": "部署后文档同步门禁已于 2026-11-24 下线：长期零运行。定义与专属检查器已移出，可从版本历史恢复。",
 }
 
 

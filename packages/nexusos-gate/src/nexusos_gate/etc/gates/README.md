@@ -30,9 +30,9 @@ etc/gates/_checks/*.py  ← 检查插件(每个文件一个检查类型,启动�
 | dispatch | POST /dispatch 前 | dispatch.yaml | ✅ 在用 |
 | persist | 用户说"落盘"后 | persist.yaml | ✅ 在用 |
 | code | git commit 前 | code.yaml | ✅ 在用 |
-| deploy-sync | 部署后文档同步检查 | — | ❌ 已退役（2611230882，30 天零运行；定义与 _checks/deploy_synced.py 在 ~/.Trash/nexus-retire-gates-2611230882/） |
-| loop_start | LOOP 全自动启动门禁 | — | ❌ 已退役（2611230882；定义在 ~/.Trash/nexus-retire-gates-2611230882/） |
-| loop_complete | LOOP 退出前出口门禁 | — | ❌ 已退役（2611230882；同上） |
+| deploy-sync | 部署后文档同步检查 | — | ❌ 已退役（2026-11-24，长期零运行；定义与 `_checks/deploy_synced.py` 已移出，可从版本历史恢复） |
+| loop_start | LOOP 全自动启动门禁 | — | ❌ 已退役（2026-11-24；定义已移出，可从版本历史恢复） |
+| loop_complete | LOOP 退出前出口门禁 | — | ❌ 已退役（2026-11-24；同上） |
 | state_transition | LOOP 状态机转换合法性 | state_transition.yaml | ✅ 在用 |
 | user_decision | 发待决/画像代决前门禁 | user_decision.yaml | ✅ 在用 |
 

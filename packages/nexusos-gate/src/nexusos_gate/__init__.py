@@ -12,7 +12,7 @@
 旧路径兼容: nexusos_xdr.gate_engine / etc.gates._checks.* 经
 nexusos_xdr/ 下的 re-export shim + symlink 继续可用(零破坏)。
 """
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 
 def gate_check(scenario: str, context: dict, agent: str = "") -> dict:

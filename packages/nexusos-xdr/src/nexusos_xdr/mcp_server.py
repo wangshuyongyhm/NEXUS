@@ -38,6 +38,7 @@ from typing import Optional
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _AUTO_DIR = _SCRIPT_DIR.parent  # 自动化脚本/
 # Task 282 P2-3: sys.path 初始化改用 nexus.paths_setup 单源（原 for 循环 hack 删）
+from nexusos_xdr import __version__
 from nexusos_xdr import _vault_env as _ve  # Task668: 包内自足（干净环境 no-op）
 _ve.setup_sys_path()
 
@@ -265,7 +266,7 @@ async def http_health(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "ok",
         "service": "nexusos-xdr",
-        "version": "1.0.0",
+        "version": __version__,
         "port": RUNTIME_PORT,
         "knowledge_base": "connected" if kb_ok else "disconnected",
         "agents": agents,
@@ -369,7 +370,7 @@ async def http_system_dump(request: Request) -> JSONResponse:
     agents, sessions, active_tasks, external_last_mile, credentials = await anyio.to_thread.run_sync(_dump_sync)
     return JSONResponse({
         "service": "nexusos-xdr",
-        "version": "1.0.0",
+        "version": __version__,
         "port": RUNTIME_PORT,
         "agents": agents,
         "sessions": sessions,
@@ -519,7 +520,7 @@ async def http_root(request: Request) -> JSONResponse:
     """根路径信息。"""
     return JSONResponse({
         "service": "nexusos-xdr",
-        "version": "1.0.0",
+        "version": __version__,
         "description": "所有 Agent 的通信协议层",
         "endpoints": {
             "mcp": "/mcp (streamable-http)",
