@@ -152,6 +152,10 @@ items:
       report_path: "{output_dir}/report.md"
       commit_msg: "{commit_msg}"
 
+  # P11: 断链趋势未暴增(WARN)——避免断链累积几个会话才发现(MEM#46758)
+  # Task1539 提速: source_exclude_dirs(机器域源侧排除,1523 vault-domains.yaml 口径)——
+  # 机器产物 wikilink 反映快照时点非可维护断链信号(Task1299 修法A 泛化);
+  # 跳过其内容读取(实测 416 文件场景 P11 11.3s 的 IO 大头)。语义=聚焦人工域断链趋势。
   - id: P11
     name: 断链趋势未暴增
     auto: true
