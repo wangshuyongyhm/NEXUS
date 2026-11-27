@@ -9,6 +9,69 @@ has four sections — `nexusos-common` / `nexusos-gate` / `nexusos-mem` /
 Removed / Fixed / Security. The layout_version axis (independent of package
 semver) is documented in each package's README.
 
+## [1.2.0] - 2026-11-27
+
+Security-and-robustness release for the three service packages; `nexusos-common` unchanged (1.0.0). Every line below is backed by the `git diff --name-status origin/master HEAD` listing of the three package repositories (published 1.1.0 → this snapshot).
+
+### nexusos-common
+
+No changes (1.0.0).
+
+### nexusos-gate
+
+**Added**
+- `etc/gates/_checks/commit_file_cap.py`: single-commit file-count cap.
+- `etc/gates/_checks/session_log_selfcheck.py`: session-log self-check.
+- `scripts/staged_tests_grouped.py`: grouped test runner used by the code gate (C5).
+
+**Changed**
+- `gate_engine.py`: event signing, dispatch hard-block, blocked-debt made visible; new `RETIRED_SCENARIOS` registry — calling a retired scenario (`loop_start` / `loop_complete` / `deploy-sync`) now returns an explicit "retired" message instead of silently passing.
+- `etc/gates/_checks/done_ack.py`, `outcome_backfill.py`, `pool_rows_flipped.py`, `persist_pool_ledger.py`, `pool_write_channel.py`, `doc_symbol_refs.py` and `tests/test_2611111773_g1_annotation.py`: aligned with the gate-core changes (`pool_rows_flipped.py` also drops a docstring reference to a retired checker).
+- `README.md`: examples path corrected to the bundled `etc/checks/examples/` (the previously documented `./examples/gates/` does not exist in the installed wheel).
+
+**Removed**
+- Three retired gate scenarios and their dedicated checkers (`loop_start` / `loop_complete` / `deploy-sync`; `agent_archive_updated.py`, `deploy_synced.py`, three scenario YAMLs) — removed from the source tree (recoverable from history), no longer in this snapshot.
+
+### nexusos-mem
+
+**Added**
+- `redact_credential.py`: credential IDs in ingested text are replaced with a fixed placeholder — both slice-ingest entry points and both write-API entry points use the same function and placeholder; replace, never reject.
+- `machine_identities.py`: machine identities — names on the machine roster are no longer issued search credentials.
+
+**Changed**
+- `search.py`: full-text search no longer forces a sequential scan (short queries take the window short-cut; the planner is consulted, the old statement kept when it does not already scan); re-ranker cooldown reserved for "service is down" — when merely busy, degrade in place and return a retry hint, and the response says whether re-ranking happened.
+- `rerank_server.py`: cooldown / degradation aligned.
+- `embed_server.py`, `embed_corpus.py`: embedding service pads to fixed shapes (20 tiers), clears cache per mode, self-restarts on memory overshoot.
+- `api_server.py`: result endpoints validate credential and record ownership; heavy-request concurrency gauge exposes `busy_rejects` on `/health`; the 403 missing-credential message now says where to get one.
+- `apply_honesty.py`, `shared.py`: search-credential issuance decision consolidated into one function.
+- `context_capture.py`, `skip_rules.py`, `scripts/backfill_identity.py`: aligned.
+- `README.md`: new "Known limitations" section — the standalone package does not ship the schema; create the database first from the open-source repository's `db/` directory.
+
+**Fixed**
+- `search.py`: three defects in the statement-error fallback — missing rollback, "transaction aborted" treated as internal error, statement timeout not reset after rollback.
+
+**Security**
+- `api_server.py`, `apply_honesty.py`, `shared.py`: result endpoints validate credential and record ownership; issuance decision consolidated.
+
+### nexusos-xdr
+
+**Added**
+- `ack_policy.py`: the dispatcher signs off on delivery, sign-offs land in the ledger; delivery receipts and sign-offs are separate fields.
+- `callback/cred_gate.py`: callbacks must present the dispatch credential (switch defaults to log-only).
+- `proc_origin.py`, `proclog_filter.py`: the server records the process origin of every write request (log only).
+- `hooks/sensitive_ops.py`, `hooks/sensitive_ops_guard.py`: sensitive-operation guards.
+- `stall_watch.py`: stall watch; steer-script path prefers `NEXUS_STEER_SCRIPT`, else the previous default.
+- `task_aliases.py`: task-number aliases.
+- `email_inbound.py`: email inbound — decision-required notices become email callbacks (the per-agent hook scripts it relies on are not shipped in the open-source edition).
+
+**Changed**
+- `ack.py`, `callback/handler.py`, `callback/outcome_autofill.py`, `credential.py`, `dispatch/main.py`, `dispatchd.py`, `task_state.py`, `session_state.py`: unified callback / sign-off commands — identity and credential handling; receipts vs. sign-offs as separate fields.
+- `patrol/loop.py`: patrol's "done" detection timing.
+- `mcp_server.py`: removed the dead `loop_start` on-pass hook (`_on_loop_start_pass`) and its registration; `mcp_auth.py`, `httpapi/routes.py`, `presence/routes.py` aligned.
+- `hooks/broadcast_guard.py`, `completion_guard.py`, `interaction_guard.py`, `selfcheck_evidence_guard.py`, `state_transition_guard.py`: guards aligned.
+- `exp_injector.py`, `needdecision_notify.py`, `notify_push.py`: notification chain aligned.
+- `p02_hardblock.py`, `layer2_calibrate.py`, `fault_http_server.py`, `tools/registry.py`: aligned.
+
 ## [1.0.0] - 2026-10-30
 
 First public release.
