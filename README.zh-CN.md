@@ -175,6 +175,8 @@ createdb nexus_mem 2>/dev/null; psql -d nexus_mem -c 'CREATE EXTENSION IF NOT EX
 psql -d nexus_mem -f db/schema.sql
 ls db/migrations/*.sql | sort | xargs -I{} psql -d nexus_mem -f {}
 
+> **提醒：**建表语句只在开源主仓的 `db/` 目录里——独立发布的 `nexusos-mem` 包不随包带它。单独安装包（不带仓库）时，先套 `db/schema.sql` 与 `db/migrations/*.sql`；空库上 `/search`、`/knowledge` 会报 `UndefinedTable`。
+
 # 4. 引导式接入（随 v1.0.0 发布）：安装向导扫描你的环境，
 #    缺什么用固定选项协商（从不出开放题），探测你已装的 Agent，
 #    并为每家打印复制即用的 MCP 配置片段

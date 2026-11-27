@@ -283,14 +283,8 @@ entries:
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vaultlink.py
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/_vaultlink.py
     rename: null
-  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_archive_updated.py
-    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_archive_updated.py
-    rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_version_synced.py
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/agent_version_synced.py
-    rename: null
-  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deploy_synced.py
-    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/deploy_synced.py
     rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/experiences_present.py
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/experiences_present.py
@@ -328,9 +322,6 @@ entries:
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/code.yaml
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/code.yaml
     rename: null
-  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/deploy-sync.yaml
-    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/deploy-sync.yaml
-    rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/dispatch.yaml
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/dispatch.yaml
     rename: null
@@ -342,12 +333,6 @@ entries:
     rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/init.yaml
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/init.yaml
-    rename: null
-  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/loop_complete.yaml
-    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/loop_complete.yaml
-    rename: null
-  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/loop_start.yaml
-    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/loop_start.yaml
     rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/persist.yaml
     dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/persist.yaml
@@ -653,4 +638,51 @@ entries:
     rename: null
   - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/p02_hardblock.py
     dst: packages/nexusos-xdr/src/nexusos_xdr/p02_hardblock.py
+    rename: null
+
+  # ── A3 追赶补全（task 2611269970）：11-18 之后新增、过了内容闸的 15 个源文件；清单头规则之外的（pyproject/README/agents/tests/私敏）仍有意不加 ──
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/etc/ruff-nexus.toml
+    dst: packages/nexusos-gate/etc/ruff-nexus.toml
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/commit_file_cap.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/commit_file_cap.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/etc/gates/_checks/session_log_selfcheck.py
+    dst: packages/nexusos-gate/src/nexusos_gate/etc/gates/_checks/session_log_selfcheck.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/scripts/staged_tests_grouped.py
+    dst: packages/nexusos-gate/src/nexusos_gate/scripts/staged_tests_grouped.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/machine_identities.py
+    dst: packages/nexusos-mem/src/nexusos_mem/machine_identities.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-mem/src/nexusos_mem/redact_credential.py
+    dst: packages/nexusos-mem/src/nexusos_mem/redact_credential.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/ack_policy.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/ack_policy.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/callback/cred_gate.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/callback/cred_gate.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/email_inbound.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/email_inbound.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/sensitive_ops.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/sensitive_ops.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/hooks/sensitive_ops_guard.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/hooks/sensitive_ops_guard.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/proc_origin.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/proc_origin.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/proclog_filter.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/proclog_filter.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/stall_watch.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/stall_watch.py
+    rename: null
+  - src: 05-System/自动化脚本/pypi/nexusos-xdr/src/nexusos_xdr/task_aliases.py
+    dst: packages/nexusos-xdr/src/nexusos_xdr/task_aliases.py
     rename: null

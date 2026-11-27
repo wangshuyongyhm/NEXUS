@@ -180,6 +180,8 @@ git clone https://github.com/wangshuyongyhm/NEXUS.git nexus-oss && cd nexus-oss
 nexus init --apply-schema          # or: psql -d nexus_mem -f db/schema.sql && \
 ls db/migrations/*.sql | sort | xargs -I{} psql -d nexus_mem -f {}
 
+> **Note:** the schema lives only here, in the repository's `db/` directory — the published `nexusos-mem` wheel does not ship it. If you install the package on its own (without the repo), apply `db/schema.sql` + `db/migrations/*.sql` first; on an empty database `/search` and `/knowledge` fail with `UndefinedTable`.
+
 # 4. Guided onboarding (shipping with v1.0.0): the setup wizard scans your
 #    environment, negotiates anything missing with fixed choices (never open
 #    questions), detects your installed agents, and prints ready-to-paste
