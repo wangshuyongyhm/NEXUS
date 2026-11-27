@@ -34,7 +34,10 @@ import json
 import os
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timezone
+import sys  # Task 2611269956: 脱敏日志
+_REDACT_STDERR = sys.stderr   # add_knowledge 里有局部 import sys，函数内直接用 sys 会 UnboundLocalError
+from nexusos_mem.redact_credential import redact_credentials  # Task 2611269956: 凭据号入库前脱敏
+# from datetime import datetime, timezone  # Task 2611269956: 模块级未使用（函数内各自 import），注释保留
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -321,7 +324,8 @@ class SharedKnowledge:
         offset: int = 0,
         core_only: bool = False,
         task_id: Optional[str] = None,  # Task 319: 关联任务（Phase 1 自动检测套用需要）
-        annotate: bool = False,  # Task 358: 显式开启套用记录（认知诚实闭环）
+        session_id: Optional[str] = None,  # 2611230868: 会话号写入套用记录 detail
+        annotate: Optional[bool] = None,  # 2611230875 乙-3：None=按 agent_id 非空自动开（与 HTTP 对齐）
         agent_id: Optional[str] = None,  # Task478: 显式归因（修复 _global_kb 单例固化 bug）
         pool: str = "all",  # 1401-d5a T2: experience|document|all（分池检索）
         decay_override: Optional[float] = None,  # 1401-d5c 消融调试口（默认 None=生产行为）
@@ -330,6 +334,7 @@ class SharedKnowledge:
         graph_mode: str = "annotate",  # task 1455: annotate=只标注 / promote=新版上浮
         readmodel: bool = False,  # Task1538 M3: related 换读模型源（opt-in，默认原路径）
         include_semantic: bool = False,  # Task1537: semantic 边 opt-in 进 riding 扩联池
+        include_failed: bool = False,  # 2611230871: 已判失败的经验默认不返回；排查带 True
     ) -> List[dict]:
         """搜索知识库（task 253：真·混合检索）。
 
@@ -370,6 +375,7 @@ class SharedKnowledge:
                         graph_expand=graph_expand, graph_mode=graph_mode,
                         readmodel=readmodel,
                         include_semantic=include_semantic,
+                        include_failed=include_failed,
                     )
                     engine = "pgvector"
                 else:
@@ -378,6 +384,7 @@ class SharedKnowledge:
                         conn, query, top_k=top_k,
                         knowledge_type=knowledge_type, project=project, tag=tag,
                         offset=offset, core_only=core_only, pool=pool,
+                        include_failed=include_failed,
                     )
                     engine = "fts_fallback"
         except psycopg2.errors.QueryCanceled as _pg_timeout:
@@ -393,6 +400,7 @@ class SharedKnowledge:
                     conn, query, top_k=top_k,
                     knowledge_type=knowledge_type, project=project, tag=tag,
                     offset=offset, core_only=core_only, pool=pool,
+                    include_failed=include_failed,
                 )
             for row in results:
                 row["pg_timeout_degrade"] = True
@@ -454,6 +462,8 @@ class SharedKnowledge:
                         # layer2 能真实校准，但 calibration_weight 单次偏差±0.3，弱模式下
                         # 到 1.5 需多次纯成功。1.15 让 high 在数据积累初期可触发；待真实
                         # outcome 积累充分（calibration_weight 普遍>1.3）可回归 1.5
+                        if _w < 0.5:
+                            row["needs_review"] = True   # 2611230871: 低权重提示，调用方可见
                         if _w >= 1.15:
                             row["confidence_label"] = "high"           # 多次验证有效（校准被放大）
                         elif _outcome == "failed":
@@ -494,6 +504,14 @@ class SharedKnowledge:
         # 经验决定套用时显式 kb.search(..., annotate=True) 触发；只对高价值类型
         # （experience/finding/decision/pitfall）annotate，document 不 annotate
         # （是索引不是经验）；try/except 包裹，annotate 失败不影响 search 返回。
+        if annotate is None:
+            # 2611230887：None=带身份就自动记（2611230875 乙-3，堵「用 Python 接口检索就不记套用」的漏洞）。
+            # 但机器名单里的身份是「系统替自己查」，没有哪个 Agent 在干活时看到了结果——默认不记，
+            # 要记必须显式传 annotate=True。名单单一真源在 nexusos_mem.machine_identities；
+            # 函数内延迟导入，避免循环导入。原判断（不删，注释留档）：
+            # annotate = bool(agent_id or self.agent_id)
+            from nexusos_mem.machine_identities import auto_annotate
+            annotate = auto_annotate(agent_id or self.agent_id)
         if annotate and results:
             try:
                 from nexusos_mem.apply_honesty import annotate_apply_attempt
@@ -502,6 +520,8 @@ class SharedKnowledge:
                 _extra = {"query": query[:200]}
                 if task_id:
                     _extra["task_id"] = task_id
+                if session_id:
+                    _extra["session_id"] = session_id
                 current_coord = capture_current_context(
                     agent_name=agent_id or self.agent_id,  # Task478: 优先显式归因
                     task_type="search",
@@ -812,6 +832,12 @@ class SharedKnowledge:
         Returns:
             新建条目的 ID（若内容与既有条目完全相同则返回既有 ID，不重复写入）
         """
+        # Task 2611269956：写入前脱敏（HTTP 与 Python 两条路都走这里；替换不拒收）
+        title, _n_title = redact_credentials(title)
+        content, _n_content = redact_credentials(content)
+        if _n_title or _n_content:
+            print(f"[redact] add_knowledge 抹去凭据号 title={_n_title} content={_n_content}",
+                  file=_REDACT_STDERR, flush=True)
         # Task 284 P0-A: 显式 source_agent 覆盖 self.agent_id（api_server 全局实例复用 bug 修复）
         effective_agent_id = source_agent or self.agent_id
 
@@ -1173,10 +1199,11 @@ class SharedKnowledge:
             except Exception:
                 pass
         # Task 334: SHADOW 已于 2026-07-23 退役，feedback 日志是孤儿数据（零消费者）。
-        # 但 ref_count UPDATE（626-631 行）仍被 injection 注入链路消费，保留。
-        # 用 SHADOW_ENABLED 守卫只停 log_activity，不动 UPDATE。
-        if os.environ.get("NEXUS_SHADOW_ENABLED", "").lower() in ("1", "true", "yes"):
-            self.log_activity("feedback", "shadow_code", detail={"code": code, "delta": delta})
+        # 但 ref_count UPDATE 仍被 injection 注入链路消费，保留，不动。
+        # 2026-11-24（任务 2611230881，用户裁定）：feedback 埋点正式下线——下面两行注释掉，
+        # 不再写 action='feedback' 日志（库里 482 条、最后一条 2026-07-28，数据保留不删）；设 NEXUS_SHADOW_ENABLED 也不再启用。
+        # if os.environ.get("NEXUS_SHADOW_ENABLED", "").lower() in ("1", "true", "yes"):
+        #     self.log_activity("feedback", "shadow_code", detail={"code": code, "delta": delta})
 
     def get_top_shadow_codes(self, limit: int = 15) -> List[dict]:
         """获取熵预算最高的 SHADOW 编码。
@@ -1356,10 +1383,16 @@ class SharedKnowledge:
     def record_apply_outcome(
         self,
         apply_attempt_id: int,
-        exp_id: int,
+        exp_id: Optional[int],
         result: str,
         evidence: str = "",
         agent_id: Optional[str] = None,  # Task1528: 显式归因（HTTP body 传参优先）
+        by: Optional[str] = None,  # 2611230944 甲：调用方身份（入口核实后传入；None=按旧行为取 agent_id/实例身份）
+        on_behalf: bool = False,  # 2611230944 甲：代填标记（入口已核实调用方为在场登记主控）
+        entry: str = "python",  # 2611230944 甲：来源入口（http/mcp/system），写进结果行
+        system_flow: Optional[str] = None,  # 2611230960 乙：系统流程显式参数（白名单在函数内）
+        supersede: bool = False,  # 2611230960 戊：主控更正通道（旧行让位保留 + 经验级回正）
+        client: Optional[dict] = None,  # 2611230963 丙：客户端来源（terminal_session/pid/ppid_comm，并进结果行 detail）
     ) -> dict:
         """Task387 Part A: Agent 套用经验后回写真实结果（认知闭环关键）。
         Task396 Step5: 加 pending 校验（通电占位值,主控验收改 success/failed）。
@@ -1383,6 +1416,74 @@ class SharedKnowledge:
         if result not in ("success", "partial", "failed", "pending", "not_applicable"):
             return {"ok": False, "error": f"result 必须是 success/partial/failed/pending/not_applicable, 得到: {result}"}
 
+        # 2611230960 丙：记录编号在入口漏网时也兜住（原 int() 直接抛 ValueError → 外层 500）
+        try:
+            apply_attempt_id = int(apply_attempt_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "status": 400, "error": "记录编号必须是整数（零写入）"}
+        if apply_attempt_id <= 0:
+            return {"ok": False, "status": 400, "error": "记录编号必须是正整数（零写入）"}
+        _corrected_from960 = None
+
+        # === 2611230944 甲：咽喉点四道判断（红队三轮 F1/F5 修复；红队四轮的「补」由结案工具侧拦）===
+        # 判断 0（记录必须存在且是套用记录）——不存在/不是套用记录：拒绝，一行都不写。
+        _ocur944 = self._get_conn().cursor()
+        try:
+            _ocur944.execute(
+                "SELECT agent_id, detail->>'auto_judged', target_id FROM agent_activity "
+                "WHERE id = %s AND action = 'apply_attempt'",
+                (int(apply_attempt_id),),
+            )
+            _orow944 = _ocur944.fetchone()
+        finally:
+            _ocur944.close()
+        if not _orow944:
+            return {"ok": False, "status": 404,
+                    "error": f"apply_attempt 记录不存在: {apply_attempt_id}（零写入）"}
+        # 2611230946-1：请求带的经验编号必须等于套用记录自己的编号
+        # （防拿一条合法记录改另一条经验的成败/反例/引用计数）——不等：拒绝，零写入
+        if exp_id is not None and _orow944[2] is not None and int(exp_id) != int(_orow944[2]):
+            return {"ok": False, "status": 403,
+                    "error": f"经验编号不匹配：请求 exp_id={exp_id}，"
+                             f"套用记录 {apply_attempt_id} 的 target_id={_orow944[2]}（零写入）"}
+        # 2611230944 丁：统一命令只带记录号时，经验编号从套用记录反查（数据补全，非判断）
+        if exp_id is None:
+            exp_id = _orow944[2]
+        if exp_id is None:
+            return {"ok": False, "error": "exp_id 缺失且套用记录无 target_id（零写入）"}
+        _owner944 = (_orow944[0] or "").strip()
+        _adopted944 = (_orow944[1] or "") == "adopted"
+        # 调用方身份：by 优先；缺省按旧行为取 agent_id 参数 / kb 实例身份（向后兼容既有调用方）
+        _by944 = (by or agent_id or (self.agent_id if self.agent_id != "anonymous" else "") or "").strip()
+        # 2611230960 甲：调用方身份为空即拒（红队四轮 R4-3——空身份曾让归属判断整段短路）
+        if not _by944:
+            return {"ok": False, "status": 403, "error": "调用方身份为空（零写入）"}
+        # 2611230960 乙：原行注释保留（不删代码）—— 
+        #   _system944 = _by944.startswith("system/")
+        # 系统流程从「by 的字符串前缀」改成显式参数 + 白名单
+        # （红队四轮 R4-4——原实现谁把 by 写成 system/任意 就绕过归属与已采用两道判断）。
+        # HTTP 与 MCP 两个入口都不透传请求里的同名字段，只有三个内部调用方传。
+        _SYSTEM_FLOW960 = ("callback-pending-fill", "outcome-autofill", "auto-adjudicate")
+        _system944 = bool(system_flow) and system_flow in _SYSTEM_FLOW960
+        if not _system944 and _by944.startswith("system/"):
+            return {"ok": False, "status": 403,
+                    "error": f"身份 {_by944} 以 system/ 开头但没有合法 system_flow"
+                             f"（白名单: {'/'.join(_SYSTEM_FLOW960)}）（零写入）"}
+        # 2611230960 戊-1：更正只留给具备代填资格的调用方（归属者本人不能自己改结论）
+        if supersede and not on_behalf:
+            return {"ok": False, "status": 403,
+                    "error": "更正（supersede）需要主控代填资格（零写入）"}
+        # 判断 1（归属）：调用方与记录归属不一致 → 仅代填标记或系统流程放行
+        if _owner944 and _by944 and _by944 != _owner944 and not on_behalf and not _system944:
+            return {"ok": False, "status": 403,
+                    "error": f"调用方 {_by944} 不是记录归属者 {_owner944}，且未带代填标记（零写入）"}
+        # 判断 2（已采用保护）：归属者本人只能给真实结果；not_applicable/pending 需代填标记或系统流程
+        if _adopted944 and result in ("not_applicable", "pending") and not on_behalf and not _system944:
+            return {"ok": False, "status": 403,
+                    "error": "该记录已采用待给结果：归属者只能给 success/partial/failed"
+                             "（not_applicable/pending 需在场主控代填标记）（零写入）"}
+        # === 四道判断结束 ===
+
         # 1635(#213 第二行) 幂等守卫：同 attempt 已有非 superseded outcome 行 → 直接复用
         # （并发下 pg_advisory_xact_lock 串行化同 attempt 写入：先提交者写行，后来者
         # 过锁后查见行即复用；配合部分唯一索引兜底防毫秒窗漏网——索引 DDL 见本单 SQL）
@@ -1402,6 +1503,21 @@ class SharedKnowledge:
                 (str(apply_attempt_id),),
             )
             _row = _gcur.fetchone()
+            # 2611230960 戊-2：带 supersede 时不走幂等复用——先把当前未让位的旧结果行让位
+            # （保留不删，带 superseded_by / at / reason），再按正常流程写新结果行。
+            # 同一记录多次更正：每次把当时未让位的行让位，历史全部保留。
+            if supersede and _row:
+                _corrected_from960 = _row[0]
+                _gcur.execute(
+                    "UPDATE agent_activity SET detail = detail || jsonb_build_object("
+                    "'superseded','true','superseded_by',%s,'superseded_at',now()::text,"
+                    "'superseded_reason',%s) "
+                    "WHERE action='apply_outcome' "
+                    "AND (detail->>'superseded') IS DISTINCT FROM 'true' "
+                    "AND detail->>'apply_attempt_id' = %s",
+                    (_by944, (evidence or "")[:500], str(apply_attempt_id)),
+                )
+                _row = None  # 穿透写新行（幂等分支不参与）
             if _row:
                 # task/1701（池#277）：旧值是「非终态值」而新值不同 → 让位覆盖——
                 # 旧行标 superseded=true，穿透主链写新值行。覆盖两类：
@@ -1460,8 +1576,11 @@ class SharedKnowledge:
         # Task1528 归因优先级：显式传参 > kb 实例真身份（≠anonymous）> attempt
         # 行套用者 > anonymous。已具名的程序化调用方（crucible 裁定 / xdr 回调
         # 占位）行为不变；只有 HTTP 漏传 body agent_id 的洞走 attempt 回填。
+        # 2611230944 甲-2：归因只认记录归属（请求自报身份不再决定归因）；
+        # 归属为空才退回旧优先级（向后兼容）
         _writer_agent = (
-            agent_id
+            _owner944
+            or agent_id
             or (self.agent_id if self.agent_id != "anonymous" else None)
             or _attempt_agent
             or "anonymous"
@@ -1479,6 +1598,17 @@ class SharedKnowledge:
                 "evidence": evidence[:500] if evidence else "",
                 "apply_attempt_id": apply_attempt_id,
                 "exp_id": exp_id,
+                # 2611230944 甲-5：结果行记清谁写的、是否代填、从哪个入口来
+                "by": _by944 or None,
+                # 2611230960 丁：落库的代填标记只在真的代别人写时为真（自己写自己不再冒充代填）
+                # 2611230960 丁：原行注释保留（不删代码）—— 
+                #   "on_behalf": bool(on_behalf),
+                "on_behalf": bool(on_behalf) and _by944 != _owner944,
+                "entry": entry,
+                # 2611230960 戊-3：更正行留痕（从哪个旧值改过来）
+                **({"corrected": True, "corrected_from": _corrected_from960} if supersede else {}),
+                # 2611230963 丙：客户端来源（统一命令带上；没带就不写）
+                **({"client": client} if client else {}),
             },
         )
 
@@ -1503,10 +1633,23 @@ class SharedKnowledge:
         cur = conn.cursor()
         try:
             if result != "not_applicable":
-                cur.execute(
-                    "UPDATE knowledge SET outcome=%s, updated=NOW() WHERE id=%s",
-                    (result, exp_id),
-                )
+                # 2611230884 N-6/己-1：failed 写 knowledge 级 outcome 前加两条件——
+                # ①真实失败总数（含本次）≥2；②当前 outcome 为空（人工结果不被覆盖）
+                _do_write = True
+                if result == "failed":
+                    cur.execute(
+                        "SELECT count(*) FROM agent_activity WHERE action='apply_attempt' "
+                        "AND target_id = %s AND outcome = 'failed'", (exp_id,))
+                    _fail_total = int(cur.fetchone()[0] or 0) + 1
+                    cur.execute("SELECT outcome FROM knowledge WHERE id = %s", (exp_id,))
+                    _row = cur.fetchone()
+                    _cur_outcome = (_row[0] if _row else None) or ""
+                    _do_write = _fail_total >= 2 and _cur_outcome == ""
+                if _do_write:
+                    cur.execute(
+                        "UPDATE knowledge SET outcome=%s, updated=NOW() WHERE id=%s",
+                        (result, exp_id),
+                    )
             # Task616 ref_count 回写：success/partial 时 +1（真套用=被引用价值；
             # failed 不加——被证伪不算引用，任务书 §5 Step1 口径）。
             # 幂等注意：本函数每次真实 outcome 回调只应调一次；重复回调同 attempt
@@ -1537,6 +1680,50 @@ class SharedKnowledge:
                     "[Task548] attempt outcome 列回写失败(不阻断 action 行语义, id=%s): %s",
                     apply_attempt_id, _col_e,
                 )
+            # 2611230960 戊-4：经验级副作用回正（只走更正通道）
+            # 规则：①旧值是 success/partial（当时 +1 过）→ ref_count 减回（不为负）；
+            #      ②knowledge.outcome 按本经验「未让位的真值结果行」最新一条重算，一条都没有 → 置空。
+            # 与既有写入规则的差异：既有规则是单点覆盖（failed 还要失败数≥2 且当前为空），
+            # 更正要的是「回到更正前的值」，所以用重算而不是再叠一次覆盖。
+            if supersede:
+                try:
+                    if _corrected_from960 in ("success", "partial"):
+                        cur.execute(
+                            "UPDATE knowledge SET ref_count = GREATEST(ref_count - 1, 0) WHERE id=%s",
+                            (exp_id,))
+                    cur.execute(
+                        "SELECT detail->>'result' FROM agent_activity "
+                        "WHERE action='apply_outcome' AND target_id=%s "
+                        "AND (detail->>'superseded') IS DISTINCT FROM 'true' "
+                        "AND detail->>'result' IN ('success','partial','failed') "
+                        "ORDER BY id DESC LIMIT 1", (exp_id,))
+                    _r960 = cur.fetchone()
+                    _new_outcome960 = _r960[0] if _r960 else None
+                    # 2611230963 丁-2：重算值是 failed 时对齐写入规则的「失败两票」门槛——
+                    # 未让位的 failed 行不足 2 条 → 改取最新未让位 success/partial 行，
+                    # 一条都没有 → 置空（与 N-6/己-1「failed 要失败总数≥2 才写」同口径）
+                    if _new_outcome960 == "failed":
+                        cur.execute(
+                            "SELECT count(*) FROM agent_activity "
+                            "WHERE action='apply_outcome' AND target_id=%s "
+                            "AND (detail->>'superseded') IS DISTINCT FROM 'true' "
+                            "AND detail->>'result' = 'failed'", (exp_id,))
+                        if int(cur.fetchone()[0] or 0) < 2:
+                            cur.execute(
+                                "SELECT detail->>'result' FROM agent_activity "
+                                "WHERE action='apply_outcome' AND target_id=%s "
+                                "AND (detail->>'superseded') IS DISTINCT FROM 'true' "
+                                "AND detail->>'result' IN ('success','partial') "
+                                "ORDER BY id DESC LIMIT 1", (exp_id,))
+                            _r961 = cur.fetchone()
+                            _new_outcome960 = _r961[0] if _r961 else None
+                    cur.execute(
+                        "UPDATE knowledge SET outcome=%s, updated=NOW() WHERE id=%s",
+                        (_new_outcome960, exp_id))
+                except Exception as _e960:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "[2611230960] 经验级回正失败(不阻断结果行): %s", _e960)
             conn.commit()
         except Exception:
             conn.rollback()

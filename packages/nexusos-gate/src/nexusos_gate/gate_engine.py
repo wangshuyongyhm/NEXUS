@@ -13,14 +13,116 @@
 Task630 首包化: 正源自 nexusos_xdr/gate_engine.py 迁入(旧位留 re-export shim)。
 插件发现改用包绝对路径 nexusos_gate.etc.gates._checks.*(不再依赖 sys.path hack)。
 """
+import hashlib
+import hmac
 import importlib
 import importlib.metadata
 import json
 import os
+import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# === Task 2611230853 件一：通过记录签名 ===
+# 密钥同用户可读：这防的是「文字里恰好带 scenario=state_transition passed=True」造成的误认，
+# 不是安全边界——同用户进程本来就能读到这把密钥。真边界在文件权限之外。
+_GATE_SIG_FILE = Path.home() / ".nexus" / "xdr" / "gate.sig"
+
+
+
+# === Task 2611230853 件六：提交说明点名文件的核对 ===
+_NAMED_FILE_SUFFIXES = (".md", ".py", ".sh", ".json", ".yaml", ".yml", ".toml", ".txt")
+
+
+def _extract_named_files(commit_msg: str) -> list:
+    """从提交说明里挑「像文件」的词：含路径分隔符的，或以已知后缀结尾的。去重保序。"""
+    out, seen = [], set()
+    for tok in re.split(r"[\s，。；、,;:：()（）\[\]「」『』\"'`]+", commit_msg or ""):
+        tok = tok.strip().strip(".")
+        if not tok:
+            continue
+        if "/" in tok or tok.endswith(_NAMED_FILE_SUFFIXES):
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
+    return out
+
+
+def _staged_matches(name: str, staged: list) -> bool:
+    """按路径后缀匹配：说明里写短名（report.md）也能对到 task/NN/output/report.md。"""
+    n = str(name).lstrip("./")
+    for s in staged or []:
+        sp = str(s).lstrip("./")
+        if sp == n or sp.endswith("/" + n) or sp.endswith(n):
+            return True
+    return False
+
+
+def _eval_commit_named_files(context: dict):
+    """返回 (passed, detail, severity_override)。一个都没点名 → 通过（不管）。"""
+    names = _extract_named_files(str((context or {}).get("commit_msg") or ""))
+    if not names:
+        return True, "说明里没点名文件（不管）", None
+    staged = (context or {}).get("staged_files") or []
+    missing = [n for n in names if not _staged_matches(n, staged)]
+    if not missing:
+        return True, f"说明点名的 {len(names)} 个文件都在暂存清单里", None
+    if len(missing) == len(names):
+        return False, "说明点名的文件都不在提交里: " + ", ".join(missing[:6]), None
+    return True, "部分点名文件不在提交里(WARN): " + ", ".join(missing[:6]), "WARN"
+
+def _gate_sig_key() -> bytes:
+    """读/生成签名密钥（32 字节随机 → hex，权限 0600）。拿不到就返回空串，调用方不加签名。"""
+    try:
+        if _GATE_SIG_FILE.exists():
+            raw = _GATE_SIG_FILE.read_bytes().strip()
+            if len(raw) >= 16:
+                return raw
+        _GATE_SIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        key = os.urandom(32).hex().encode()
+        _GATE_SIG_FILE.write_bytes(key)
+        os.chmod(_GATE_SIG_FILE, 0o600)
+        return key
+    except Exception:
+        return b""
+
+
+def gate_sign(scenario: str, agent: str, ts: str) -> str:
+    """对 `场景|实例|时间戳` 做 HMAC-SHA256，取前 16 个十六进制字符。"""
+    key = _gate_sig_key()
+    if not key:
+        return ""
+    return hmac.new(key, f"{scenario}|{agent}|{ts}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()[:16]
+
+
+# === Task 2611230853 件五：每项检查的执行记录 ===
+_GATE_EXEC_LOG = Path.home() / ".nexus" / "xdr" / "gate-exec.jsonl"
+_GATE_EXEC_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _append_exec_log(scenario: str, agent: str, task_id: str, results: list) -> None:
+    """每跑一项检查追加一行（通过也留痕，回答「是每次都过还是从来没跑」）。
+    超过 20MB → 旧内容改名 .1 再新建（只留一代）。观察件：写不进去不影响门禁。"""
+    try:
+        if _GATE_EXEC_LOG.exists() and _GATE_EXEC_LOG.stat().st_size > _GATE_EXEC_MAX_BYTES:
+            os.replace(_GATE_EXEC_LOG, Path(str(_GATE_EXEC_LOG) + ".1"))
+        _GATE_EXEC_LOG.parent.mkdir(parents=True, exist_ok=True)
+        # 2611230858：统一用世界时（总线自己的事件用 utc，同一条流里别混两种时区）
+        # 原：ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with _GATE_EXEC_LOG.open("a", encoding="utf-8") as f:
+            for r in results:
+                f.write(json.dumps({
+                    "ts": ts, "scenario": scenario, "agent": agent, "task_id": task_id,
+                    "check": r.get("id"), "status": r.get("status"),
+                    "severity": r.get("severity"),
+                }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 import nexusos_common as _nxc
 
@@ -43,6 +145,10 @@ CHECKS_DIR = ENGINE_DIR / "etc" / "gates" / "_checks"
 _GATE_WARN_WINDOW_SEC = float(os.environ.get("NEXUS_GATE_WARN_WINDOW", "600"))
 _WARN_EMIT_CACHE: dict = {}
 
+# CLI 未提供身份时的兜底标记。它**不是**真 Agent（不在 AGENT_REGISTRY），
+# 仅用于“调用方未声明身份”这个状态的可观测占位（见 _upgrade_agent_from_context）。
+CLI_FALLBACK_AGENT = "cli"
+
 
 def _plugin_warn_agent() -> str:
     """插件告警事件的归因名（Task1561 / 1547-F6）。
@@ -54,8 +160,52 @@ def _plugin_warn_agent() -> str:
     return os.environ.get("NEXUS_AGENT") or "nexus"
 
 
+# 2611192325：插件加载诊断（显性化）——原实现只打一行 stderr（launchd 链下被
+# 2>/dev/null 吞掉）+ 写 PG，monitor 侧看不到「哪个插件没跑、影响哪个检查项」。
+# 这里把每次跳过的结构化原因记在模块级列表里，供 I8 等消费方显性告警。
+PLUGIN_LOAD_DIAG: list = []
+
+
+def _py_version_note(exc: Exception) -> str:
+    """识别「Python 版本不兼容」类失败（PEP 604 的 `X | None` 在 <3.10 抛 TypeError）。"""
+    msg = str(exc)
+    if isinstance(exc, TypeError) and "unsupported operand type(s) for |" in msg:
+        return f"需 Python >=3.10（PEP 604 注解语法）；本解释器 {sys.version.split()[0]}"
+    if isinstance(exc, SyntaxError):
+        return f"语法不兼容本解释器 {sys.version.split()[0]}：{getattr(exc, 'msg', exc)}"
+    return ""
+
+
+def _affected_gate_items(plugin_stem: str) -> str:
+    """该插件 type 被哪些 gate 场景/检查项引用（说清「影响哪个检查项」）。"""
+    hits = []
+    try:
+        for y in sorted(GATES_DIR.glob("*.yaml")):
+            try:
+                cfg = yaml.safe_load(y.read_text(encoding="utf-8")) or {}
+            except Exception:
+                continue
+            # 场景 YAML 里 type 嵌在 check 里（`- id: G8 / check: {type: complexity_aware}`），
+            # 也有少量写在 items 顶层的写法——两处都认（2611192325 实测：只查顶层会误报"死插件"）。
+            def _itype(item):
+                c = item.get("check")
+                return (c.get("type") if isinstance(c, dict) else None) or item.get("type")
+            ids = [str(it.get("id")) for it in (cfg.get("items") or []) if _itype(it) == plugin_stem]
+            if ids:
+                hits.append(f"{y.stem}({','.join(ids)})")
+    except Exception:
+        pass
+    return "、".join(hits) if hits else "未被任何 gate 场景引用（死插件）"
+
+
 def _log_gate_plugin_warn(plugin_name: str, reason: str):
-    """插件加载告警写 PG agent_activity（让 monitor 能发现死插件）。fail-open。"""
+    """插件加载告警写 PG agent_activity（让 monitor 能发现死插件）。fail-open。
+
+    NEXUS_GATE_PLUGIN_WARN_PG=0 可关（2611192325：I8 每小时会 import 一次引擎做探针，
+    若也写 PG 就是 ~96 行/天 重复噪音——探针只要读 PLUGIN_LOAD_DIAG，不需要重复记账）。
+    """
+    if os.environ.get("NEXUS_GATE_PLUGIN_WARN_PG", "1") == "0":
+        return
     try:
         import psycopg2
         conn = psycopg2.connect(dbname="nexus_mem")
@@ -97,9 +247,19 @@ def _load_check_plugins() -> dict:
                 print(f"[gate_engine] 插件 {f.name} 未导出 check 函数,跳过", file=sys.stderr)
                 _log_gate_plugin_warn(f.name, "未导出 check 函数")
         except Exception as e:
-            # 插件加载失败,记 WARN 跳过(不崩 engine) + 写 PG 告警(让 monitor 发现)
-            print(f"[gate_engine] 插件 {f.name} 加载失败: {e},跳过", file=sys.stderr)
-            _log_gate_plugin_warn(f.name, f"加载失败: {e}")
+            # 2611192325：版本不兼容显性化——统一 WARN 前缀 + 结构化 diag + 影响面。
+            # 注意：显性化 ≠ 硬跑；不兼容插件仍跳过（硬跑会让整个 gate 场景崩）。
+            reason = _py_version_note(e) or f"{type(e).__name__}: {str(e)[:120]}"
+            affected = _affected_gate_items(f.stem)
+            PLUGIN_LOAD_DIAG.append({
+                "plugin": f.name,
+                "reason": reason,
+                "affected": affected,
+                "python": sys.version.split()[0],
+            })
+            print(f"[gate_engine] ⚠️ 插件 {f.name} 被跳过：{reason}；影响检查项：{affected}",
+                  file=sys.stderr)
+            _log_gate_plugin_warn(f.name, f"加载失败（{reason}）；影响检查项：{affected}")
     return plugins
 
 
@@ -163,6 +323,15 @@ CHECK_PLUGINS = {**_load_entry_point_checks(), **_load_check_plugins()}
 # 用户 checks.d 场景追加项（$NEXUS_HOME/gate/checks.d/*.yaml）——按需懒读后缓存。
 _USER_CHECKS_D_CACHE: dict = {}
 
+# 2611230882：已下线场景（用户裁定，退役记录见知识库）。传入这些场景名时给明确的
+# 「已下线」说明，而不是「YAML 不存在」——调用方一眼看出是退役不是路径坏了。
+# 单一真源：下线/恢复只改这里。
+RETIRED_SCENARIOS = {
+    "loop_start": "LOOP 启动门禁已于 2026-11-24 下线（任务 2611230882）：23 小时仅 1 次调用、内容是字段长度检查。定义文件在 ~/.Trash/nexus-retire-gates-2611230882/。",
+    "loop_complete": "LOOP 退出门禁已于 2026-11-24 下线（任务 2611230882）：同 loop_start。定义文件在 ~/.Trash/nexus-retire-gates-2611230882/。",
+    "deploy-sync": "部署后文档同步门禁已于 2026-11-24 下线（任务 2611230882）：30 天零运行。定义与专属检查器在 ~/.Trash/nexus-retire-gates-2611230882/。",
+}
+
 
 def _load_scenario(scenario: str) -> dict:
     """加载场景 YAML。返回配置 dict。
@@ -172,6 +341,8 @@ def _load_scenario(scenario: str) -> dict:
     """
     yaml_path = GATES_DIR / f"{scenario}.yaml"
     if not yaml_path.exists():
+        if scenario in RETIRED_SCENARIOS:
+            raise FileNotFoundError(RETIRED_SCENARIOS[scenario])
         raise FileNotFoundError(f"场景 YAML 不存在: {yaml_path}")
     with open(yaml_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -332,6 +503,44 @@ def register_on_pass(scenario: str, callback) -> None:
     _ON_PASS_HOOKS[scenario] = callback
 
 
+def _match_exemptions(cfg: dict, context: dict) -> list:
+    """池 #969-B（2611192126）：YAML 层豁免匹配。
+
+    done.yaml 等 scenario YAML 顶层 ``exemptions:`` 段声明式定义（MEM#116515
+    口径——任务书层声明豁免无效，必须 YAML 层）。规则形如::
+
+        exemptions:
+          - id: shadow-tasks
+            match: {task_id_glob: "xdr-*-shadow-*"}   # 或 caller_in: [...]
+            skip_items: [G1, G3, G4, G7, G12]
+            mark: "exempt=shadow"
+
+    返回命中的规则列表（skip 决策在 item 循环内按 skip_items 精确匹配）。
+    """
+    import fnmatch
+
+    rules = cfg.get("exemptions") or []
+    if not isinstance(rules, list):
+        return []
+    out = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        match = rule.get("match") or {}
+        tid = str(context.get("task_id", "") or "")
+        hit = False
+        pat = match.get("task_id_glob")
+        if pat and tid:
+            hit = fnmatch.fnmatch(tid, str(pat))
+        if not hit and match.get("caller_in"):
+            caller = str(context.get("caller")
+                         or context.get("agent") or "")
+            hit = caller in match["caller_in"]
+        if hit:
+            out.append(rule)
+    return out
+
+
 def check(scenario: str, context: dict, agent: str = "") -> dict:
     """过场景门禁。返回 {passed, failures, hard_fails, warns}。
 
@@ -370,11 +579,31 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
 
     # 4. 逐项检查
     results = []
+    # 池 #969-B（2611192126）：YAML 层豁免——命中规则的 skip_items 项
+    # status=exempt（不出 failures，可见于结果 exempted 列表；豁免≠放水，
+    # 消费方（done 回调 handler）据 exempted 标记 task_state + 事件流日报）
+    active_exemptions = _match_exemptions(cfg, context)
+    exempted_marks = []
     for item in cfg.get("items", []):
         item_id = item.get("id", "?")
         item_name = item.get("name", item_id)
         severity = item.get("severity", "WARN")
         is_auto = item.get("auto", True)
+
+        _ex_rule = next(
+            (r for r in active_exemptions
+             if item_id in (r.get("skip_items") or [])), None)
+        if _ex_rule is not None:
+            _ex_mark = str(_ex_rule.get("mark", _ex_rule.get("id", "exempt")))
+            results.append({
+                "id": item_id, "name": item_name, "status": "exempt",
+                "severity": severity,
+                "detail": f"豁免({_ex_rule.get('id', '?')}): {_ex_mark}",
+            })
+            exempted_marks.append(
+                {"rule": _ex_rule.get("id"), "item": item_id,
+                 "mark": _ex_mark})
+            continue
 
         if not is_auto:
             # manual 项:只列 reminder
@@ -387,7 +616,23 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
         check_cfg = item.get("check", {})
         check_type = check_cfg.get("type", "")
         # 解析占位符
+        # Task 2611230860：检查项级别的参数（P21 的 max_files 这类）合并进 check_cfg，
+        # 插件签名不用变（params 里就能看到），也不用把这些值抄进 check 子树。
+        _item_params = {k: v for k, v in item.items()
+                        if k not in ("id", "name", "auto", "severity", "check", "reminder")}
+        if _item_params:
+            check_cfg = {**_item_params, **check_cfg}
         check_cfg = _resolve_template(check_cfg, context)
+
+        # Task 2611230853 件六：提交说明点名的文件必须在提交里（引擎内置类型，非插件）
+        if check_type == "commit_named_files":
+            _cok, _cdetail, _csev = _eval_commit_named_files(context)
+            results.append({
+                "id": item_id, "name": item_name,
+                "status": "pass" if _cok else "fail",
+                "severity": _csev or severity, "detail": _cdetail,
+            })
+            continue
 
         check_fn = CHECK_PLUGINS.get(check_type)
         if check_fn is None:
@@ -428,6 +673,9 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
         "warns": warns,
         "manual": manual,
     }
+    # 池 #969-B：豁免明细随结果下发（handler 侧标 task_state + 事件流日报）
+    if exempted_marks:
+        result["exempted"] = exempted_marks
     # 池 #613: rc=1 时输出「哪个 check + 找不到哪个文件 + 尝试过的路径」
     if path_diagnostics:
         result["path_diagnostics"] = path_diagnostics
@@ -460,7 +708,11 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
     # mcp_server 侧重复块已删（防双写）。fail-open：登记失败绝不影响 gate 结果。
     try:
         from nexusos_xdr import session_state as _ss
-        _gate_agent = agent or context.get("agent") or context.get("source") \
+        # Task2611191111 第四档：shim CLI（nexusos_xdr/gate_engine.py）不经过正源
+        # __main__，只调 check()——所以这里也必须补一次，否则 shim 路径的事件
+        # 仍旧落在 "cli" 上。空身份则原样返回，后续 source/caller/unknown 兜底链不变。
+        _gate_agent = _upgrade_agent_from_context(agent, context) \
+            or context.get("agent") or context.get("source") \
             or context.get("caller") or "unknown"
         # T657 修1: 同任务同结果只发一次事件——治 648 实证的重扫放大
         # （patrol 预检 + callback bg-gate + agent 重试回调三源都会跑 done gate，
@@ -478,14 +730,37 @@ def check(scenario: str, context: dict, agent: str = "") -> dict:
                 _emit_evt = _ts657.once_flag(_tid657, _sig657)
             except Exception:
                 _emit_evt = True  # 判重失败→保守发（宁可重复不可丢信号）
+        # Task 2611230853 件五：每项检查留执行记录（通过也留痕）
+        _append_exec_log(scenario, _gate_agent, str((context or {}).get("task_id") or ""), results)
         if _emit_evt:
+            # Task 2611230853 件一：state_transition 的通过记录带签名。
+            # 时间戳经 extra 注入 append_event（其 event.update(extra) 在设置 ts 之后执行），
+            # 所以事件里的 ts 就是这里签的那个 —— 守卫能用事件自身的 agent/ts 复算同一 HMAC。
+            _sig_detail = ""
+            _sig_extra = None
+            if scenario == "state_transition":
+                try:
+                    # 2611230858：世界时；这个值同时用于签名与 extra={"ts": …}，
+                    # 所以「事件 ts == 签名 ts」的性质不变（守卫用事件 ts 复算）。
+                    # 原：_sig_ts = datetime.now().astimezone().isoformat(timespec="seconds")
+                    _sig_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    _sig_val = gate_sign(scenario, _gate_agent, _sig_ts)
+                    if _sig_val:
+                        _sig_detail = f" sig={_sig_val}"
+                        _sig_extra = {"ts": _sig_ts}
+                except Exception:
+                    _sig_detail = ""
+            _tid_note = (f" task_id={context.get('task_id')}"
+                         if (context or {}).get("task_id") else "")
             _ss.append_event(
                 agent=_gate_agent,
                 event_type="gate_check",
-                detail=f"scenario={scenario} passed={result.get('passed')} "
-                       f"reject={[r.get('id', '?') for r in result.get('hard_fails', [])]} "
-                       f"warn={[r.get('id', '?') for r in result.get('warns', [])]}",
+                detail=(f"scenario={scenario} passed={result.get('passed')} "
+                        f"reject={[r.get('id', '?') for r in result.get('hard_fails', [])]} "
+                        f"warn={[r.get('id', '?') for r in result.get('warns', [])]}"
+                        f"{_tid_note}{_sig_detail}"),
                 target=f"gate:{scenario}",
+                extra=_sig_extra,
             )
         # Task1704 件二（池#286）：WARN 命中独立落 events——原 WARN 只回调用方
         # 不落盘，code 场景 3 周 262 次运行 WARN 零留存，「误报率」永远算不出。
@@ -523,18 +798,104 @@ def _checks_dir_rel() -> str:
     return str(CHECKS_DIR.relative_to(ENGINE_DIR))
 
 
+def _resolve_cli_agent(argv: list) -> tuple:
+    """CLI 落流身份解析：返回 (agent, 去掉 --agent 后的 argv)。
+
+    MEM#95841 正修方向落地（Task2611172047）——CLI 直跑 gate 时若身份兜底
+    "cli"，而 cli 不在 AGENT_REGISTRY（session_state.py:147-172 身份校验），
+    append_event 必抛 ValueError → gate_check 事件不落流 → state_transition_guard
+    的 60s 事件窗看不到 passed=True → dispatch 恒被拦（2010 实操整条弯路）。
+
+    优先级（任务书 §4 裁定，与 nexus-persist-commit.sh / hook 同款口径）：
+        NEXUS_AGENT env  >  --agent <name>  >  兜底 "cli"
+    env 优先是为了与既有 hook/commit 链保持"同一个身份源"；--agent 只作
+    显式覆盖（两者冲突时 stderr 提示，便于排障）。
+
+    用法兼容：``gate_engine.py <scenario> '<json>' [--agent <name>]`` 与
+    ``--agent=<name>`` 两种写法都认，其余位置参数原样保留。
+    """
+    flag_agent = ""
+    kept = []
+    skip_next = False
+    for idx, arg in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--agent":
+            flag_agent = argv[idx + 1] if idx + 1 < len(argv) else ""
+            skip_next = True
+            continue
+        if arg.startswith("--agent="):
+            flag_agent = arg.split("=", 1)[1]
+            continue
+        kept.append(arg)
+
+    # env 只在**显式设置**时优先——不能拿默认值 "cli" 冒充"env 已设"，否则
+    # `--agent zcode` 在未设 env 的机器上会被默认值吃掉（B6 首轮实测踩到）。
+    env_agent = (os.environ.get("NEXUS_AGENT", "") or "").strip()
+    if env_agent:
+        if flag_agent and flag_agent != env_agent:
+            print(f"[gate] NEXUS_AGENT={env_agent} 优先于 --agent {flag_agent}"
+                  "（B6：显式 env > flag > cli）", file=sys.stderr)
+        return env_agent, kept
+    return (flag_agent.strip() or CLI_FALLBACK_AGENT), kept
+
+
+def _upgrade_agent_from_context(agent: str, context: dict) -> str:
+    """身份链第四档：调用方没声明身份时，用 context.agent 补位（Task2611191111）。
+
+    完整四档优先级（前面的赢）：
+        显式 NEXUS_AGENT env  >  --agent 旗标  >  context.agent（本函数）  >  兜底 "cli"
+
+    为什么需要这一档：CLI 直跑 gate（尤其走 shim ``nexusos_xdr/gate_engine.py``）
+    时，调用模板只写 ``'{"agent":"zcode",...}'`` 而不会带 env/flag——于是身份
+    落回 "cli"，而 "cli" 不在 AGENT_REGISTRY，append_event 抛 ValueError，
+    gate_check 事件不落流 → state_transition_guard 看不到本次 → dispatch 被拦
+    （MEM#95841 / #116823）。init/dispatch 场景的 context 本来就必带 agent，
+    所以它是天然的第四档来源，不需要调用方额外记一个 flag。
+
+    为什么只在“兜底档”生效：MEM#116823 首版的坑就是让新来源吃掉了更高优先档。
+    因此这里只处理**入参为空或恰好等于兜底标记 "cli"** 的情形；一旦调用方显式
+    声明了身份（env/flag），原样返回，绝不覆盖。
+
+    校验与 append_event 同源：用 ``nexusos_xdr.session_state.validate_agent``
+    （即 append_event 抛 ValueError 前调用的同一函数），不复制名单成第二真源。
+    nexusos_xdr 不可达时（纯 gate 包独立部署）原样返回——那种部署本就写不了
+    事件，升级与否无差别。
+    """
+    current = (agent or "").strip()
+    if current and current != CLI_FALLBACK_AGENT:
+        return current          # 更高优先档已生效，不动
+    candidate = (context or {}).get("agent")
+    if not isinstance(candidate, str) or not candidate.strip():
+        return current      # 无候选：原样返回（空就是空，交给上层兜底链）
+    candidate = candidate.strip()
+    if candidate == CLI_FALLBACK_AGENT:
+        return current
+    try:
+        from nexusos_xdr import session_state as _ss_validate
+    except Exception:
+        return current      # 独立包部署：无从校验，保持原态
+    try:
+        ok, _reason = _ss_validate.validate_agent(candidate)
+    except Exception:
+        return current
+    return candidate if ok else current
+
+
 if __name__ == "__main__":
     # CLI 调试入口:python3 gate_engine.py done '{"task_path":"...","files":[],...}'
     import json
-    if len(sys.argv) < 2:
-        print("用法: gate_engine.py <scenario> [context_json]")
+    # B6/MEM#95841: --agent 旗标 + NEXUS_AGENT env（env > flag > cli，见 _resolve_cli_agent）
+    _cli_agent, _cli_argv = _resolve_cli_agent(sys.argv[1:])
+    if not _cli_argv:
+        print("用法: gate_engine.py <scenario> [context_json] [--agent <name>]")
         sys.exit(2)
-    scenario = sys.argv[1]
-    context = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
-    # T678b 修1: agent 读 NEXUS_AGENT env（默认 cli）——原硬编码 "cli" 未注册，
-    # xdr 事件写入必败（MEM#62544①）→ state_transition_guard 的 60s 事件检查
-    # 诚实路径永远无法满足。与 nexus-persist-commit.sh 同款语义。
-    _cli_agent = os.environ.get("NEXUS_AGENT", "cli")
+    scenario = _cli_argv[0]
+    context = json.loads(_cli_argv[1]) if len(_cli_argv) > 1 else {}
+    # Task2611191111 第四档：context 解析完才能补位（_resolve_cli_agent 跑在解析之前，
+    # 那时拿不到 context）。仅当身份仍是兜底 "cli" 时才升级，env/flag 更高优先档不受影响。
+    _cli_agent = _upgrade_agent_from_context(_cli_agent, context)
     # T678b 修1: CLI 不经 registry——vault_root 预注入复用 678 防线
     # （context > env NEXUS_VAULT_ROOT > 包位置推导；解析失败沿用其人话报错）
     try:

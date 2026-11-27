@@ -31,16 +31,17 @@ import argparse
 import hashlib
 import os
 import re
-import sys
+# import sys  # Task 2611269956: 未使用（ruff F401），注释保留
 import time
-from pathlib import Path
-from typing import List, Optional
+# from pathlib import Path  # Task 2611269956: 未使用（ruff F401），注释保留
+from typing import Optional  # Task 2611269956: List 未使用，收窄
+from nexusos_mem.redact_credential import redact_credentials  # Task 2611269956: 凭据号入库前脱敏
 
 import psycopg2
 import psycopg2.extras
 
 # 复用 search.py 的模型单例（同进程内只加载一次）
-from nexusos_mem.search import _get_bge_m3, BGE_M3_DIM
+from nexusos_mem.search import _get_bge_m3  # Task 2611269956: BGE_M3_DIM 未使用
 
 DEFAULT_DSN = os.environ.get(
     "NEXUS_PG_DSN", "postgresql://localhost/nexus_mem"
@@ -226,6 +227,8 @@ def embed_docs(limit: Optional[int] = None, batch: int = 64) -> dict:
         if not chunks:
             skipped += 1
             continue
+        # Task 2611269956：入库前脱敏（与文件监听那道同一个函数、同一个占位）
+        chunks = [redact_credentials(c)[0] for c in chunks]
 
         # 迁移：删除该文档的 legacy 整文行（path==rel，无 #c 后缀）
         if rel in existing:

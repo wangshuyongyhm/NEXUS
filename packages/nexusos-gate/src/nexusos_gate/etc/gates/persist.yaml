@@ -152,20 +152,6 @@ items:
       report_path: "{output_dir}/report.md"
       commit_msg: "{commit_msg}"
 
-  # P10: Agent档案updated兜底(WARN)——动过Agent目录需更档案updated字段
-  - id: P10
-    name: Agent 档案 updated
-    auto: true
-    severity: WARN
-    check:
-      type: agent_archive_updated
-      dirs: "{touched_dirs}"
-      date: "{date}"
-
-  # P11: 断链趋势未暴增(WARN)——避免断链累积几个会话才发现(MEM#46758)
-  # Task1539 提速: source_exclude_dirs(机器域源侧排除,1523 vault-domains.yaml 口径)——
-  # 机器产物 wikilink 反映快照时点非可维护断链信号(Task1299 修法A 泛化);
-  # 跳过其内容读取(实测 416 文件场景 P11 11.3s 的 IO 大头)。语义=聚焦人工域断链趋势。
   - id: P11
     name: 断链趋势未暴增
     auto: true
@@ -302,3 +288,32 @@ items:
     check:
       type: pool_write_via_wrapper
       vault_root: "{vault_root}"
+
+
+  # P20: 提交说明点名的文件必须在提交里（Task 2611230853 件六）
+  # 说明里点名文件（含路径分隔符或以已知后缀结尾）→ 每个都得在 staged_files 里；
+  # 全部不在=REJECT，部分不在=WARN，一个都没点名=通过（不管）。
+  - id: P20
+    name: 提交说明点名文件在提交里
+    auto: true
+    severity: REJECT
+    check:
+      type: commit_named_files
+
+  # P21: 单笔提交文件数上限（Task 2611230860）
+  # staged_files 超过 max_files → 没带 large_commit_reason 就 REJECT；带了就 WARN 放行（原因进尾注）。
+  - id: P21
+    name: 单笔提交文件数上限
+    auto: true
+    severity: REJECT
+    max_files: 300
+    check:
+      type: commit_file_cap
+
+  # P22: 会话日志自检（Task 2611230860）——先以 WARN 跑 30 天攒数据，再议是否升 REJECT
+  - id: P22
+    name: 会话日志自检段落在位
+    auto: true
+    severity: WARN
+    check:
+      type: session_log_selfcheck

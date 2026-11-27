@@ -10,6 +10,18 @@ required_context:
   - {name: files, desc: "产出文件列表", required: true}
   - {name: summary, desc: "完成摘要", required: true}
   - {name: experiences, desc: "经验列表", required: false}
+# 池 #969-B（2611192126）：影子任务豁免——YAML 层声明（MEM#116515 口径：
+# 任务书层声明豁免无效是已定谳的坑）。e2e-suite F2 影子任务（task_id 形态
+# xdr-<agent>-shadow-e2esuite-<ts>-<pid>，chain-f.sh:15 注册源）产物天然无
+# report/experiences（并发/乱序回调演练件），产出类五项豁免；G2（summary
+# 充分）等非产出类安全项保留。豁免≠放水：结果 exempted 列表 → handler 侧
+# task_state.gate_exempt + gate_exempt 事件（日报统计当日豁免数防滥用）。
+exemptions:
+  - id: shadow-tasks
+    match:
+      task_id_glob: "xdr-*-shadow-*"
+    skip_items: [G1, G3, G4, G7, G12]
+    mark: "exempt=shadow"
 items:
   # G1: files[] 非空且每个文件真实存在(硬)——规则4 外部证据
   # B1 修复:原用 field_check 只数 len,小弟可报幽灵路径过门禁。改用 files_exist 逐个验存在
@@ -146,23 +158,24 @@ items:
 
 
   # G13: Agent 档案当日更新(Task698 B, #80 尾巴)——task-spec §2 第 7 项 gate 化。
-  # <vault>/05-System/Agent/<source>/经验与坑.md mtime == done 当日 → pass；
-  # 无当日条目 → WARN"落盘契约第 7 项未做"。WARN 起步(参照 G12 节奏,验证后主控裁决升级)。
-  - id: G13
-    name: Agent 档案当日更新
-    auto: true
-    severity: WARN
-    check:
-      type: command
-      cmd: >
-        f="$(printenv NEXUS_AGENT_ARCHIVE || printf '%s' '{vault_root}/05-System/Agent/{source}/经验与坑.md')";
-        if [ ! -f "$f" ]; then echo "档案不存在: $f"; exit 1; fi;
-        d=$(stat -f '%Sm' -t '%Y-%m-%d' "$f");
-        if [ "$d" = "$(date +%Y-%m-%d)" ]; then echo "当日有更新($d)"; exit 0; fi;
-        echo "档案 $f 最后更新 $d 非今日——落盘契约第 7 项未做（写 经验与坑.md 后再 done）";
-        exit 1
-      expect_rc: 0
-      timeout: 10
+  # 2611230882 下线（用户裁定 U17「强制追加经验与坑」机制退役）：门禁不再把「档案今天
+  # 必须有追加」当硬条件。B5「问题解决后主动写档案 + 经验入库」仍是用户规矩（2026-08-13
+  # 定向），只是改为自愿——门禁只提示不检查。原检查段原样注释保留，可逆。
+  # - id: G13
+  #   name: Agent 档案当日更新
+  #   auto: true
+  #   severity: WARN
+  #   check:
+  #     type: command
+  #     cmd: >
+  #       f="$(printenv NEXUS_AGENT_ARCHIVE || printf '%s' '{vault_root}/05-System/Agent/{source}/经验与坑.md')";
+  #       if [ ! -f "$f" ]; then echo "档案不存在: $f"; exit 1; fi;
+  #       d=$(stat -f '%Sm' -t '%Y-%m-%d' "$f");
+  #       if [ "$d" = "$(date +%Y-%m-%d)" ]; then echo "当日有更新($d)"; exit 0; fi;
+  #       echo "档案 $f 最后更新 $d 非今日——落盘契约第 7 项未做（写 经验与坑.md 后再 done）";
+  #       exit 1
+  #     expect_rc: 0
+  #     timeout: 10
   # G14: 任务子图连通(Task956 建闸→09071853 升级覆盖完整性)。
   # 956 原版只查「## 产出登记」段标题存在——1177 实证"有段但漏列文件"照过闸
   # (09071853 复发 837 个 task 域孤儿)。插件 task_subgraph_connected 两层:

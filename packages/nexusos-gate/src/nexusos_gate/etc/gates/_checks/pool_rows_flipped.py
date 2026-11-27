@@ -34,7 +34,7 @@ _YAML_FENCE_RE = re.compile(r"```yaml(.*?)```", re.DOTALL)
 
 
 def _coerce_list(value):
-    """把 value 规整成 list[str]（gate 占位符可能传 "[]" 字符串，对齐 agent_archive_updated）。"""
+    """把 value 规整成 list[str]（gate 占位符可能传 "[]" 字符串）。"""
     if value is None:
         return []
     if isinstance(value, list):
@@ -80,11 +80,23 @@ def _report_complete(report_path: Path) -> bool:
     return bool(m and m.group(1) == "complete")
 
 
+_BARE_DONE_CELL = re.compile(r"\|\s*✅\s*\|")                 # 老写法：状态格只有一个 ✅
+_OPEN_STATUS_CELL = re.compile(r"\|\s*(?:待办|进行中|待用户|挂起)\s*\|")
+_X_FIRST_CELL = re.compile(r"^\|\s*\[x\]")                    # 首格带 [x]
+
+
 def _pool_row_closed(pool_text: str, num: str) -> bool:
-    """池中 | NN | 行（同号多行任一）含「闭环」即算已翻。行不存在=未翻（WARN 报出）。"""
-    row_re = re.compile(r"^\|\s*" + re.escape(num) + r"\s*\|", re.MULTILINE)
+    """池中编号为 num 的行（同号多行任一）已闭环即算已翻。行不存在=未翻（WARN 报出）。
+
+    闭环的写法都认：行内含「闭环」（固定选项 ✅已闭环 走这条）；状态格是老写法裸 ✅
+    （同一行里没有 待办/进行中/待用户/挂起 格）；首格带 [x]。
+    """
+    row_re = re.compile(r"^\|\s*(?:\[x\]\s*)?#?" + re.escape(num) + r"\s*\|", re.MULTILINE)
     for m in row_re.finditer(pool_text):
-        if "闭环" in pool_text[m.start():pool_text.find("\n", m.start())]:
+        row = pool_text[m.start():pool_text.find("\n", m.start())]
+        if "闭环" in row or _X_FIRST_CELL.match(row):
+            return True
+        if _BARE_DONE_CELL.search(row) and not _OPEN_STATUS_CELL.search(row):
             return True
     return False
 

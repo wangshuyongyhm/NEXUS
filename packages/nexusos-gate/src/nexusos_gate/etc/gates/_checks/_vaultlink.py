@@ -85,7 +85,9 @@ def strip_code_blocks(text: str) -> str:
       span 渲染为空格）；落单奇数反引号=语法残缺，按普通文本保持提取。
     """
     kept, _ = split_fences(text)
-    kept = re.sub(r"(?<!`)(`{2,})([^`\n]*?)\1(?!`)", "", kept)
+    # B5（池#826 邻接）：内容类允许更短反引号序列（CommonMark ``a `b` c`` 双包单
+    # 语义）——tempered (?!\1) 排除开栏序列本身；跨行仍禁（陷阱2，#826③ 口径）。
+    kept = re.sub(r"(?<!`)(`{2,})((?:(?!\1)[^\n])*?)\1(?!`)", "", kept)
     return re.sub(r"(?<!`)`([^`]+)`(?!`)", "", kept)
 
 

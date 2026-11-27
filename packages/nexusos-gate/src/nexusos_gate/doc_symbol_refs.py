@@ -13,6 +13,7 @@
   - 路径参数化（从 __file__ 推导 vault_dir，不硬编码绝对路径）
 """
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,6 +23,13 @@ from typing import Optional
 # Vault 根（1410 移到包根后重数 6 层上溯）：
 # nexusos_gate→src→nexusos-gate→pypi→自动化脚本→05-System→Vault 根
 _DEFAULT_VAULT_DIR = str(Path(__file__).resolve().parents[6])
+
+
+def _obsidian_cli_disabled() -> bool:
+    """停用开关文件存在时视为没有 obsidian 命令（CLI 桥会挂死不返回，改走 rg 兜底）。"""
+    raw = (os.environ.get("NEXUS_OBSIDIAN_CLI_SWITCH") or "").strip()
+    switch = Path(raw).expanduser() if raw else Path.home() / ".nexus/xdr/obsidian-cli.disabled"
+    return switch.exists()
 
 
 def _run_cmd(cmd: list, cwd: Optional[str] = None, timeout: int = 15) -> tuple:
@@ -70,7 +78,8 @@ def scan_wikilink_refs(target_doc: str, vault_dir: Optional[str] = None) -> list
     target_bare = target_doc[:-3] if target_doc.endswith(".md") else target_doc
 
     source_files = []
-    obsidian_bin = shutil.which("obsidian")
+    # obsidian_bin = shutil.which("obsidian")
+    obsidian_bin = None if _obsidian_cli_disabled() else shutil.which("obsidian")
     if obsidian_bin:
         rc, out, _ = _run_cmd(
             [obsidian_bin, "backlinks", f"file={target_bare}", "format=json"],
@@ -200,7 +209,8 @@ def scan_unresolved_links(vault_dir: Optional[str] = None, limit: int = 50) -> l
         [{"link": "..."}, ...]  断链目标清单（前 limit 个）
     """
     vd = vault_dir or _DEFAULT_VAULT_DIR
-    obsidian_bin = shutil.which("obsidian")
+    # obsidian_bin = shutil.which("obsidian")
+    obsidian_bin = None if _obsidian_cli_disabled() else shutil.which("obsidian")
     if not obsidian_bin:
         return []
     rc, out, _ = _run_cmd(

@@ -27,6 +27,8 @@ NAMED_SKIP_DIRS = {
     "health-reports",         # 健康报告不 embed
     "reports",                # 运行报告不 embed
     "_retired",               # corpus 通道遗留排除项
+    "MEM图谱",               # 2026-11-24（task 2611230854）：图谱卡停用，不再反向索引
+    "MEM镜像",               # 2026-11-24（task 2611230854）：镜像保留文件但不反向索引（防回声）
 }
 
 

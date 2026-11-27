@@ -54,30 +54,45 @@ items:
       expect_rc: 0
       timeout: 30
 
-  # I4: 能力自检(软)——6 能力文件 × 5 关键词 grep 命中
-  - id: I4
-    name: 能力自检
+  # I9: 机器完整性巡检(硬)——站点目录启动期自动加载面 + 启动链的哈希基线对账(2611239904)
+  #   0=一致 → pass；1=有多出/变化/缺失 → REJECT；2=巡检自身出错 → REJECT(绝不当成一致)
+  #   基线更新只能人工触发：bash nexus-integrity-check.sh --update-baseline
+  #   参数可用环境变量覆盖（NEXUS_INTEGRITY_WATCHLIST / _BASELINE / _REPORT_DIR），测试在临时目录里跑
+  - id: I9
+    name: 机器完整性巡检
     auto: true
-    severity: WARN
+    severity: REJECT
     check:
       type: command
-      # 检查能力目录有≥6 个 .md 文件,且关键词命中≥5(grep -rl 数)
-      # 08201651 修:原 `|| { ...; }` 花括号组在 folded 标量折行后被 str.format
-      # 当占位符→KeyError→整串回退→{vault_root} 不解析(shell bad substitution)。
-      # 改 if/then 等价形态(零花括号),语义不变。
-      cmd: >
-        dir="${{NEXUS_CAPABILITY_DIR:-{vault_root}/05-System/NEXUS-CONSTRAINT}}";
-        if [ ! -d "$dir" ]; then echo "能力目录不存在: $dir"; exit 1; fi;
-        files=$(find "$dir" -maxdepth 2 -name "*.md" | wc -l | tr -d ' ');
-        kw=$(grep -rEoh "工具|流程|约束|示例|边界" "$dir" 2>/dev/null | sort -u | wc -l | tr -d ' ');
-        if [ "$files" -ge 6 ] && [ "$kw" -ge 5 ]; then echo "files=$files kw=$kw"; else echo "files=$files kw=$kw (要求≥6/≥5)"; exit 1; fi
+      cmd: 'out=$(/bin/bash "{vault_root}/05-System/自动化脚本/nexus-integrity-check.sh" 2>&1); rc=$?; printf "%s\n" "$out" | /usr/bin/tail -3; case $rc in 0) exit 0;; *) exit 1;; esac'
       expect_rc: 0
-      timeout: 15
+      timeout: 60
 
-  # I5: launchd 服务全注册(软)——Task418 自动注册的双保险
-  # 2026-08-03 会话08031120: scheduler 未注册致 ValueError(Bug11同类复发)。
-  # Task418 已实现模块加载时自动注册,本项是检测层:自动注册失败时告警。
-  # 校验: launchctl list 的 ai.nexus.* 服务名是否都在 AGENT_REGISTRY
+  # I4: 能力自检(软)——6 能力文件 × 5 关键词 grep 命中
+  # 2026-11-24（任务 2611230842，用户裁定）：I4 停用——名为「能力自检」，实际只数约束目录 .md 个数与 5 个关键词，与能力卡无关；真的能力卡检查另案接入。原文保留备查。
+#   - id: I4
+#     name: 能力自检
+#     auto: true
+#     severity: WARN
+#     check:
+#       type: command
+#       # 检查能力目录有≥6 个 .md 文件,且关键词命中≥5(grep -rl 数)
+#       # 08201651 修:原 `|| { ...; }` 花括号组在 folded 标量折行后被 str.format
+#       # 当占位符→KeyError→整串回退→{vault_root} 不解析(shell bad substitution)。
+#       # 改 if/then 等价形态(零花括号),语义不变。
+#       cmd: >
+#         dir="${{NEXUS_CAPABILITY_DIR:-{vault_root}/05-System/NEXUS-CONSTRAINT}}";
+#         if [ ! -d "$dir" ]; then echo "能力目录不存在: $dir"; exit 1; fi;
+#         files=$(find "$dir" -maxdepth 2 -name "*.md" | wc -l | tr -d ' ');
+#         kw=$(grep -rEoh "工具|流程|约束|示例|边界" "$dir" 2>/dev/null | sort -u | wc -l | tr -d ' ');
+#         if [ "$files" -ge 6 ] && [ "$kw" -ge 5 ]; then echo "files=$files kw=$kw"; else echo "files=$files kw=$kw (要求≥6/≥5)"; exit 1; fi
+#       expect_rc: 0
+#       timeout: 15
+# 
+#   # I5: launchd 服务全注册(软)——Task418 自动注册的双保险
+#   # 2026-08-03 会话08031120: scheduler 未注册致 ValueError(Bug11同类复发)。
+#   # Task418 已实现模块加载时自动注册,本项是检测层:自动注册失败时告警。
+#   # 校验: launchctl list 的 ai.nexus.* 服务名是否都在 AGENT_REGISTRY
   - id: I5
     name: launchd 服务全注册
     auto: true

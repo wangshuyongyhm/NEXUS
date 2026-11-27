@@ -45,6 +45,7 @@ from http.server import ThreadingHTTPServer as HTTPServer, BaseHTTPRequestHandle
 from urllib.parse import urlparse, parse_qs
 
 # Task1948（池#235）runbook 7.3：凭据模式拦截——POST /knowledge 携带明文凭据特征的写入
+from nexusos_mem.redact_credential import redact_credentials  # Task 2611269956: 凭据号入库前脱敏
 # 400 拒收（不落 PG/FTS/向量索引）+ 审计日志留痕。模式清单=任务书 9 类；值长度阈值
 # 压误报（文档引用字段名/占位串如 change_me 不拦）。
 CREDENTIAL_PATTERNS = [
@@ -100,7 +101,7 @@ _thread_local = threading.local()
 # 1822 hang 修复: 可观测计量（/health 暴露）+ handler 级 socket 超时。
 # timeout=65: 半开客户端连接上 readline/recv 最多阻塞 65s 即线程释放
 # （线程本地 PG 连接随之 GC）——堵住"死客户端线程永不退出→连接泄漏累积"。
-_REQ_STATE = {"active": 0, "total": 0, "errors": 0}
+_REQ_STATE = {"active": 0, "total": 0, "errors": 0, "busy": 0}
 _START_TS = time.time()
 
 # 1822: 重请求并发闸（search/knowledge）——快败 503 替代排队等死。
@@ -140,6 +141,7 @@ def _health_payload():
         "active_requests": _REQ_STATE["active"],
         "total_requests": _REQ_STATE["total"],
         "error_requests": _REQ_STATE["errors"],
+        "busy_rejects": _REQ_STATE["busy"],
     }
 
 
@@ -396,11 +398,14 @@ class APIHandler(BaseHTTPRequestHandler):
             _search_fail_closed = os.environ.get("NEXUS_SEARCH_FAIL_CLOSED", "1") == "1"
             if _search_fail_closed and _agent_id_explicit and agent_id != "anonymous":
                 # 非 anonymous Agent 必须持有 search_cred（通过 X-Credential header 传）
-                _search_cred = self.headers.get("X-Credential", "")
+                # 2611230960 丙：同上，检索入口也去首尾空白
+                # 原行注释保留（不删代码）： _search_cred = self.headers.get("X-Credential", "")
+                _search_cred = self.headers.get("X-Credential", "").strip()
                 if _search_cred:
                     try:
                         from nexusos_xdr.credential import verify_credential
-                        _valid, _detail = verify_credential(_search_cred, "search_cred")
+                        # 2611230884 N-2：凭据属主必须等于请求身份（防冒用机器名）
+                        _valid, _detail = verify_credential(_search_cred, "search_cred", agent_id)
                     except Exception as _e:
                         import sys as _sys_sc
                         print(f"[Task405] search credential verify 异常(fail-open放行): {_e}", file=_sys_sc.stderr, flush=True)
@@ -408,7 +413,18 @@ class APIHandler(BaseHTTPRequestHandler):
                 else:
                     _valid = False
                 if not _valid:
-                    self._json(403, {"error": "search凭据不完整", "detail": "非anonymous检索需X-Credential header（search_cred）"})
+                    # 2611192010: 响应体不能只说「缺什么」，得说「去哪拿」——凭据三来源已成本地
+                    # 事实（register 签发 / dispatch 副本 frontmatter / Agent 静态文件）。
+                    self._json(403, {
+                        "error": "search凭据不完整",
+                        "detail": (
+                            "非anonymous检索需X-Credential header（search_cred）。"
+                            "凭据三来源：①xdr register 响应的 search_credential_id；"
+                            "②dispatch 任务书副本 frontmatter 的 search_credential_id；"
+                            "③静态文件 05-System/Agent/<你的名字>/search_cred.txt。"
+                            "不带 agent_id 的匿名检索豁免（人类/兜底通道）。"
+                        ),
+                    })
                     return
                 # Task563: 凭据反查兜底 task_id。task_id 解析优先级：
                 #   显式 ?task_id 参数 > /tmp 上下文文件 > 凭据绑定的 task_id（本层）
@@ -447,16 +463,35 @@ class APIHandler(BaseHTTPRequestHandler):
             graph_expand = params.get("graph_expand", ["true"])[0].lower() in ("true", "1", "yes")
             graph_mode = params.get("graph_mode", ["annotate"])[0]
             readmodel = params.get("readmodel", ["false"])[0].lower() in ("true", "1", "yes")  # Task1538 M3 opt-in
+            include_failed = params.get("include_failed", ["false"])[0].lower() in ("true", "1", "yes")  # 2611230871 排查用
             # Task1537: semantic 边 riding opt-in（默认关=生产行为不变；
             # 增值层试点期显式 include_semantic=1 才扩，见 search.py riding 段）
             include_semantic = params.get("include_semantic", ["false"])[0].lower() in ("true", "1", "yes")
-            if annotate_param.lower() in ("false", "0", "no"):
+            # 2611230868: 机器流量不记套用——caller_kind 三处取（query > header > 机器名单）
+            _ck = params.get("caller_kind", [""])[0] or self.headers.get("X-Caller-Kind", "")
+            from nexusos_mem.apply_honesty import is_machine_caller as _is_machine_868
+            if _is_machine_868(agent_id, _ck, self.headers.get("X-Caller-Kind", "")):
                 annotate = False
+                import sys as _sys_m8
+                print(f"[2611230868] 机器检索不记套用 (agent={agent_id}, caller_kind={_ck})",
+                      file=_sys_m8.stderr, flush=True)
+            elif annotate_param.lower() in ("false", "0", "no"):
+                # 2611230884 N-1：不记套用的开关只对机器名单内身份生效；
+                # 名单外 Agent 带 annotate=false → 忽略并按 auto 规则（记日志）
+                if _is_machine_868(agent_id, _ck, self.headers.get("X-Caller-Kind", "")):
+                    annotate = False
+                else:
+                    import sys as _sys_n1
+                    print(f"[2611230884] 名单外 {agent_id} 带 annotate=false 被忽略（防自愿缩分母）",
+                          file=_sys_n1.stderr, flush=True)
+                    annotate = agent_id != "anonymous"
             elif annotate_param.lower() in ("true", "1", "yes"):
                 annotate = True
             else:
                 # auto(默认): Agent 检索时开, anonymous 检索时关
                 annotate = agent_id != "anonymous"
+            _task_q = params.get("task_id", [""])[0] or None
+            _sess_q = params.get("session_id", [""])[0] or None
             kb = _get_kb(agent_id)
             # [Task 376 P0-2] kb.search() 走 _get_conn()→psycopg2.connect，
             # PG 断连/索引损坏时抛 OperationalError，冒泡到 BaseHTTPRequestHandler
@@ -467,6 +502,7 @@ class APIHandler(BaseHTTPRequestHandler):
             #   快败+退避才是诚实语义）；②QueryCanceled(语句超时)不再重试——超时
             #   本身就是过载信号，重试是负载放大器（压测实锤 3×30s 死亡螺旋）。
             if not _HEAVY_SEM.acquire(blocking=False):
+                _REQ_STATE["busy"] += 1  # 2611172060 M1/M2 数据面：重请求闸 503 busy 计数（/health 暴露）
                 self._json(503, {"error": "busy: 重请求并发已满,请退避重试", "hint": "retry-after 1s"})
                 return
             results = None
@@ -475,8 +511,12 @@ class APIHandler(BaseHTTPRequestHandler):
                     try:
                         results = kb.search(
                             q, top_k=top_k, offset=offset, project=project, knowledge_type=ktype,
+                            include_failed=include_failed,
                             tag=tag,
                             task_id=task_id,
+                            # 2611230904：请求里的 session_id 在上面读进了 _sess_q 却一直没传给检索接口
+                            # （写了没传）。为空时是 None，和 task_id 的写法一致。
+                            session_id=_sess_q,
                             annotate=annotate,
                             agent_id=agent_id,
                             pool=pool,
@@ -489,6 +529,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     except psycopg2_errors.QueryCanceled:
                         import sys
                         print(f"[1822] /search 语句超时(过载),不重试快败: {q[:40]}", file=sys.stderr, flush=True)
+                        _REQ_STATE["busy"] += 1  # 2611172060：闸内过载 503 busy 同计数（M3 语义在 C2 分开看延迟）
                         self._json(503, {"error": "busy: 检索语句超时(过载保护),请退避重试"})
                         return
                     except Exception as e:
@@ -635,6 +676,15 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
+                # 2611239006：服务端自己查来历（只记录、不拦）；并进结果行已有的 client 块
+                _origin9006 = {}
+                try:
+                    from nexusos_xdr import proc_origin as _po9006
+                    _origin9006 = _po9006.observe(
+                        "apply_outcome", str(body.get("agent_id") or ""),
+                        peer=getattr(self, "client_address", None), server_port=11537)
+                except Exception:  # noqa: BLE001 — 埋点绝不影响业务返回
+                    _origin9006 = {}
             except (json.JSONDecodeError, ValueError, TypeError) as e:
                 self._json(400, {"error": f"invalid request: {e}"})
                 return
@@ -642,13 +692,52 @@ class APIHandler(BaseHTTPRequestHandler):
             exp_id = body.get("exp_id", body.get("knowledge_id"))
             result = body.get("result", body.get("outcome"))
             agent_id = body.get("agent_id", "anonymous")  # kb 实例键；Task1528: 漏传时归因走 attempt 行回填（池 #204）
-            if exp_id is None or result is None:
-                self._json(400, {"error": "missing required field: exp_id(或 knowledge_id)/result(或 outcome)"})
+            # 2611230884 N-7：身份为空/匿名时不允许按 knowledge_id 跨 Agent 解析待回填记录
+            _explicit_agent = str(body.get("agent_id") or "").strip()
+            if not _explicit_agent or _explicit_agent == "anonymous":
+                if body.get("apply_attempt_id") is None:
+                    self._json(403, {"error": "匿名或空身份只能按 apply_attempt_id 回填，不允许按 knowledge_id 替别人结案"})
+                    return
+            # 2611230947：结果必填；经验编号与记录编号至少带一个（带了记录号没带经验编号
+            # 放行到咽喉点反查——统一命令「记录号、结果、证据」三参数用法，修复前被此校验 400 挡回）
+            if result is None or (exp_id is None and body.get("apply_attempt_id") is None):
+                self._json(400, {"error": "missing required field: result(或 outcome) 必填；exp_id(或 knowledge_id) 与 apply_attempt_id 至少带一个"})
                 return
             result = str(result).lower().strip()
             if result not in ("success", "partial", "failed", "not_applicable"):
                 self._json(400, {"error": "result must be success/partial/failed/not_applicable"})
                 return
+            # === 2611230944 乙：写入口 fail-closed（红队三轮 F1）===
+            # ① 写操作没有匿名豁免：必须具名，且凭据持有者就是调用方身份
+            if not _explicit_agent or _explicit_agent == "anonymous":
+                self._json(403, {"error": "写结果必须具名：写操作没有匿名豁免，凭据持有者须等于该身份"})
+                return
+            # ② 必须带 X-Credential，校验与 /search 同一套；校验出错也不放行（写入口不 fail-open）
+            # 2611230960 丙：凭据首尾空白先去掉再验（原样进查询会把带空格的合法凭据判成「不存在」）
+            # 原行注释保留（不删代码）： _ocred944 = self.headers.get("X-Credential", "")
+            _ocred944 = self.headers.get("X-Credential", "").strip()
+            if not _ocred944:
+                self._json(403, {"error": "写结果必须带 X-Credential（search_cred）"})
+                return
+            try:
+                from nexusos_xdr.credential import verify_credential as _vc944
+                _ov944, _od944 = _vc944(_ocred944, "search_cred", _explicit_agent)
+            except Exception as _oe944:
+                self._json(403, {"error": f"凭据校验出错（写入口不放行）: {type(_oe944).__name__}"})
+                return
+            if not _ov944:
+                self._json(403, {"error": f"凭据无效: {_od944}"})
+                return
+            # ③ 调用方是不是在场登记的主控（查消息总线在场登记；查不到/连不上都按不是）
+            _on_behalf944 = False
+            try:
+                import urllib.request as _ur944
+                with _ur944.urlopen("http://127.0.0.1:19998/session/active", timeout=3) as _fp944:
+                    _adoc944 = json.loads(_fp944.read().decode("utf-8", "replace"), strict=False)
+                _ent944 = (_adoc944.get("agents") or {}).get(_explicit_agent) or {}
+                _on_behalf944 = str(_ent944.get("role", "")) == "orchestrator"
+            except Exception:
+                _on_behalf944 = False
             kb = _get_kb(agent_id)
             try:
                 apply_attempt_id = body.get("apply_attempt_id")
@@ -659,13 +748,42 @@ class APIHandler(BaseHTTPRequestHandler):
                         self._json(r.get("status", 400), {"error": r.get("error", "resolve failed")})
                         return
                     apply_attempt_id = r["apply_attempt_id"]
+                # 2611230960 丙：编号非整数/非正整数 → 400（原 int() 抛 ValueError → 500）
+                try:
+                    _aid960 = int(apply_attempt_id)
+                except (TypeError, ValueError):
+                    self._json(400, {"error": "apply_attempt_id 必须是整数（记录编号）"})
+                    return
+                if _aid960 <= 0:
+                    self._json(400, {"error": "apply_attempt_id 必须是正整数"})
+                    return
                 ret = kb.record_apply_outcome(
-                    apply_attempt_id=int(apply_attempt_id),
-                    exp_id=int(exp_id),
+                    # 原行注释保留（不删代码，编号已在上面校验）： apply_attempt_id=int(apply_attempt_id),
+                    apply_attempt_id=_aid960,
+                    # exp_id=int(exp_id),
+                    # 2611230947：只带记录号时经验编号为空，int(None) 必崩（500）；
+                    # 原样传空，由咽喉点反查（shared.py 2611230944 丁 record_apply_outcome）
+                    exp_id=int(exp_id) if exp_id is not None else None,
                     result=result,
                     evidence=body.get("evidence", ""),
                     agent_id=body.get("agent_id"),  # Task1528: 显式传参优先；None 时 record 内回填 attempt 套用者
+                    by=_explicit_agent,  # 2611230944：调用方身份=凭据持有者
+                    on_behalf=_on_behalf944,  # 2611230944：在场主控代填标记
+                    entry="http",
+                    # 2611230960 戊：主控更正通道（请求体布尔字段；system_flow 不透传）
+                    supersede=bool(body.get("supersede", False)),
+                    # 2611230963 丙：客户端来源（可选；统一命令带上，并进结果行 detail.client）
+                    # 2611239006：把服务端自己查到的来历并进结果行已有的 client 块
+                    client=({**(body.get("client") if isinstance(body.get("client"), dict) else {}),
+                             **({"origin": _po9006.trace_block(_origin9006)} if _origin9006 else {})}),
                 )
+                # 2611230944 乙-3：记录不存在 404；归属/已采用拦截 403
+                if ret.get("status") == 404:
+                    self._json(404, ret)
+                    return
+                if ret.get("status") == 403:
+                    self._json(403, ret)
+                    return
                 self._json(200, ret)
             except Exception as e:
                 import sys
@@ -840,12 +958,16 @@ class APIHandler(BaseHTTPRequestHandler):
 
         # 1822: 写路径同受重请求并发闸保护（add_knowledge 含 embedding+PG 写事务）
         if not _HEAVY_SEM.acquire(blocking=False):
+            _REQ_STATE["busy"] += 1  # 2611172060 M1/M2 数据面：写路径闸 503 busy 计数
             self._json(503, {"error": "busy: 重请求并发已满,请退避重试", "hint": "retry-after 1s"})
             return
         kb = None
         try:
             kb = _get_kb(agent_id)
 
+            # Task 2611269956: 写入接口这一道脱敏（与切片那道同一个函数、同一个占位；替换不拒收）
+            title, _n_title = redact_credentials(title)
+            content, _n_content = redact_credentials(content)
             # 查写入前是否存在（用于判断是否去重命中）
             pre = kb.find_id_by_title_content(title, content)
 
@@ -888,6 +1010,7 @@ class APIHandler(BaseHTTPRequestHandler):
             if kb is not None:
                 try: kb._get_conn().rollback()
                 except Exception: pass  # silent: 同上，防 aborted 毒化
+            _REQ_STATE["busy"] += 1  # 2611172060：写入过载 503 busy 同计数
             self._json(503, {"error": "busy: 写入语句超时(过载保护),请退避重试", "hint": "retry-after 1s"})
             return
         except Exception as e:

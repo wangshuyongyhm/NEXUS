@@ -46,16 +46,33 @@ DEFAULT_HOST = os.environ.get("NEXUS_RERANK_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("NEXUS_RERANK_PORT", "11437"))
 
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
-MAX_DOC_CHARS = 500  # reranker max_length 512 token，500 字符约 250-500 token 安全
+# 2611269944：文本长度与最大 token 改成 env 可注入（按实测定；缺省保持原来的 500/512）。
+MAX_DOC_CHARS = int(os.environ.get("NEXUS_RERANK_MAX_DOC_CHARS", "500"))
+MAX_LEN = int(os.environ.get("NEXUS_RERANK_MAX_LEN", "512"))
 
 _RERANK_LOCK = threading.Lock()
-# 1635(#213 软挂根治)：锁获取超时熔断——持锁线程楔死在 MPS 调用上时，新请求快速失败 503
+# 1635(#213 软挂根治)：锁获取超时熔断——持锁线程楔死在 MPS 调用上时，新请求快速失败
 # 而非无限排队（把"永不返回"变"可观测失败"，楔死线程清场留给 watchdog 重启）。env 可注入。
-_LOCK_TIMEOUT = float(os.environ.get("NEXUS_RERANK_LOCK_TIMEOUT", "120"))
-_STATE = {"ready": False, "scored": 0, "started": time.time(), "model": RERANKER_MODEL_NAME}
+#
+# 2611269944：等锁上限从 120s 改成 **0.3s**，并把「忙」和「坏」分开：
+#   服务端串行是物理约束，排队不是故障——等不到就立刻回 429「忙」+ Retry-After，
+#   客户端收到「忙」只降级这一次（不冷却）。这样五路并发里最多一路真做重排，其余立刻返回，
+#   没有一路把时间耗在排队上，也没有一路被误判成故障。
+_LOCK_TIMEOUT = float(os.environ.get("NEXUS_RERANK_BUSY_WAIT",
+                                    os.environ.get("NEXUS_RERANK_LOCK_TIMEOUT", "0.3")))
+_RETRY_AFTER_SEC = int(os.environ.get("NEXUS_RERANK_RETRY_AFTER", "1"))
+# 2611269944：保温（冷启动第一次为什么慢量出来后定的处置；0=不做）
+_KEEPWARM_SEC = float(os.environ.get("NEXUS_RERANK_KEEPWARM_SEC", "300"))
+_STATE = {"ready": False, "scored": 0, "started": time.time(), "model": RERANKER_MODEL_NAME,
+          "lock_wait_ms": round(_LOCK_TIMEOUT * 1000, 1), "keepwarm_sec": _KEEPWARM_SEC,
+          "keepwarm_runs": 0, "keepwarm_last_ms": None, "busy_rejects": 0, "train_time_ms": None}
 
 # 模型懒加载（两种后端：FlagModel 优先，transformers AutoModel fallback）
 _MODEL_CACHE = {"backend": None, "model": None, "tokenizer": None}
+
+
+class BusyError(Exception):
+    """2611269944：等锁超时＝「忙」，不是故障（客户端据此只降级这一次，不冷却）。"""
 
 
 def _load_model():
@@ -128,10 +145,20 @@ def _compute_scores(query: str, documents: list) -> list:
     # do_POST 统一转 503（api_server 既有重试+冷却链衔接；原 with 无限等待是软挂放大器）
     acquired = _RERANK_LOCK.acquire(timeout=_LOCK_TIMEOUT)
     if not acquired:
-        print(f"[rerank_server] LOCK-TIMEOUT {(_LOCK_TIMEOUT):.0f}s（持锁线程疑似楔死，"
-              f"scored={_STATE['scored']}）——本请求快速失败", file=sys.stderr, flush=True)
-        raise TimeoutError(f"rerank lock timeout {_LOCK_TIMEOUT:.0f}s")
+        _STATE["busy_rejects"] += 1
+        print(f"[rerank_server] BUSY 等锁超过 {_LOCK_TIMEOUT * 1000:.0f}ms（排队中，非故障）"
+              f"scored={_STATE['scored']} busy_rejects={_STATE['busy_rejects']}", file=sys.stderr, flush=True)
+        raise BusyError(f"rerank busy: 等锁超过 {_LOCK_TIMEOUT * 1000:.0f}ms")
     try:
+        return _infer(query, docs, backend, model, tokenizer)
+    finally:
+        # 1635：手动 acquire 必配 finally 归还（还原原 with 的异常安全语义——任何退出路径含异常都释放）
+        _RERANK_LOCK.release()
+
+
+def _infer(query, docs, backend, model, tokenizer):
+    """真正的模型推理（**不含锁**）。2611269944 拆出来，让「等锁→忙」这条能测且不必动模型。"""
+    if True:
         if backend == "flagreranker":
             # FlagReranker.compute_score 接受 list of [q, d] pairs
             pairs = [[query, d] for d in docs]
@@ -154,7 +181,7 @@ def _compute_scores(query: str, documents: list) -> list:
                 chunk = docs[i:i + CHUNK]
                 encodings = tokenizer(
                     [query] * len(chunk), chunk,
-                    padding=True, truncation=True, max_length=512, return_tensors="pt"
+                    padding=True, truncation=True, max_length=MAX_LEN, return_tensors="pt"
                 )
                 encodings = {k: v.to(_dev) for k, v in encodings.items()}
                 with torch.no_grad():
@@ -169,9 +196,6 @@ def _compute_scores(query: str, documents: list) -> list:
             except Exception:
                 pass
             return scores_out
-    finally:
-        # 1635：手动 acquire 必配 finally 归还（还原原 with 的异常安全语义——任何退出路径含异常都释放）
-        _RERANK_LOCK.release()
 
 
 def _rerank(query: str, documents: list, top_n: int = None) -> list:
@@ -202,11 +226,13 @@ def _rerank(query: str, documents: list, top_n: int = None) -> list:
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def _send(self, code, payload):
+    def _send(self, code, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for _k, _v in (headers or {}).items():      # 2611269944：Retry-After 等
+            self.send_header(_k, str(_v))
         self.end_headers()
         self.wfile.write(body)
 
@@ -220,6 +246,14 @@ class _Handler(BaseHTTPRequestHandler):
                 "scored": _STATE["scored"],
                 "uptime_sec": round(uptime, 1),
                 "backend": _MODEL_CACHE.get("backend"),
+                "lock_wait_ms": round(_LOCK_TIMEOUT * 1000, 1),   # 现读（测试可注入）
+                "busy_rejects": _STATE.get("busy_rejects"),
+                "keepwarm_sec": _STATE.get("keepwarm_sec"),
+                "keepwarm_runs": _STATE.get("keepwarm_runs"),
+                "keepwarm_last_ms": _STATE.get("keepwarm_last_ms"),
+                "warmup_ms": _STATE.get("train_time_ms"),
+                "max_doc_chars": MAX_DOC_CHARS,
+                "max_len": MAX_LEN,
             })
             return
         if self.path == "/":
@@ -262,9 +296,15 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             results = _rerank(query, documents, top_n=top_n)
+        except BusyError as e:
+            # 2611269944：忙 → 429 + Retry-After（客户端把「忙」当降级，不冷却、不重试）
+            self._send(429, {"error": f"{e}", "busy": True, "retry_after": _RETRY_AFTER_SEC},
+                       headers={"Retry-After": str(_RETRY_AFTER_SEC)})
+            return
         except TimeoutError as e:
-            # 1635：锁超时熔断 → 503 busy（api_server 既有 30s×3 重试+冷却链衔接；区别于 500 内部错误）
-            self._send(503, {"error": f"{e}（busy/楔死熔断，稍后重试）"})
+            # 老路径（其它地方抛的 TimeoutError）仍按 503 处理
+            self._send(503, {"error": f"{e}（busy/超时，稍后重试）", "busy": True},
+                       headers={"Retry-After": str(_RETRY_AFTER_SEC)})
             return
         except Exception as e:
             # 不泄漏 traceback 给客户端（BUG-12 模式），记 stderr
@@ -300,7 +340,9 @@ def _warmup():
         except Exception:
             pass
         _STATE["ready"] = True
-        print(f"[rerank_server] ✅ warmup 完成 ({time.time()-t0:.1f}s), "
+        _STATE["train_time_ms"] = round((time.time() - t0) * 1000, 1)
+        print(f"[rerank_server] ✅ warmup 完成 ({time.time()-t0:.1f}s, "
+              f"{_STATE['train_time_ms']:.0f}ms), "
               f"监听 http://{DEFAULT_HOST}:{DEFAULT_PORT}", flush=True)
     except Exception as e:
         print(f"[rerank_server] ❌ warmup 失败: {e}", file=sys.stderr, flush=True)
@@ -308,10 +350,36 @@ def _warmup():
         # 不立即退出，让 launchd KeepAlive 重启
 
 
+def _keepwarm_loop():
+    """2611269944：保温——每隔 `NEXUS_RERANK_KEEPWARM_SEC` 秒跑一次单篇推理。
+
+    为什么需要：冷启动第一次慢是因为权重页被系统压掉/核函数首次编译（见 cold-start.txt 的测量），
+    之后长时间不调用会再冷下去。保温成本是一次单篇推理（几十毫秒），换来「第一个真实请求不超时」。
+    保温与真实请求共用同一把锁，所以它不会让真实请求多等太久：等不到就由真实请求按「忙」快速失败。
+    """
+    interval = _KEEPWARM_SEC
+    if interval <= 0:
+        print("[rerank_server] 保温关闭（NEXUS_RERANK_KEEPWARM_SEC=0）", flush=True)
+        return
+    while True:
+        time.sleep(interval)
+        t0 = time.time()
+        try:
+            _compute_scores("keepwarm", ["keepwarm document text"])
+            _STATE["keepwarm_runs"] += 1
+            _STATE["keepwarm_last_ms"] = round((time.time() - t0) * 1000, 1)
+        except Exception as e:  # noqa: BLE001 — 保温失败不影响服务
+            print(f"[rerank_server] 保温失败（不影响服务）: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+
+
 def main():
-    print(f"[rerank_server] 启动 (port={DEFAULT_PORT}, host={DEFAULT_HOST})", flush=True)
+    print(f"[rerank_server] 启动 (port={DEFAULT_PORT}, host={DEFAULT_HOST}, "
+          f"busy_wait={_LOCK_TIMEOUT * 1000:.0f}ms, max_len={MAX_LEN}, "
+          f"doc_chars={MAX_DOC_CHARS}, keepwarm={_KEEPWARM_SEC:.0f}s)", flush=True)
     # 异步 warmup（不阻塞 main 线程启动 HTTP 监听）
     threading.Thread(target=_warmup, daemon=True, name="rerank-warmup").start()
+    threading.Thread(target=_keepwarm_loop, daemon=True, name="rerank-keepwarm").start()
 
     server = ThreadingHTTPServer((DEFAULT_HOST, DEFAULT_PORT), _Handler)
     try:

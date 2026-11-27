@@ -7,7 +7,7 @@
      「gate 自动登记」段追加一行（编号走 pool-next-id.sh 原子取号 + --check 防占）。
   2. 同 tag + 同关键（目录/项名）已有未闭环 gate 行 → 不重复登记（#723 起跨 agent 去重）。
   3. 后续任意 agent persist 同项 pass 时 → 池内同 tag+关键 的未闭环 gate 行自动标闭环
-     （状态 待办→✅，备注追加自动闭环注记；P4 额外要求目录 ∈ 本次 touched_dirs）。
+     （状态 待办→✅已闭环，闭环注记写进备注格，闭环后仍是七格规范行；P4 额外要求目录 ∈ 本次 touched_dirs）。
      人工行/非 gate 告警行类型列不是 gate告警，不会被误闭环（#723 缺陷③放宽判据）。
 
 写入纪律（池 #124 前科 + #723 统一通道）：
@@ -31,6 +31,7 @@ SECTION_HEADER = "## gate 自动登记（persist 台账，Task1879-B）"
 TABLE_HEADER = ("| # | 问题 | 类型 | 提出时间 | 提出会话 | 状态 | 备注 |\n"
                 "|---|------|------|----------|----------|------|------|\n")
 OPEN_STATUS = "待办"
+CLOSED_STATUS = "✅已闭环"  # 状态格固定选项；老写法是裸 ✅（迁移时按「原状态」留痕）
 GATE_ROW_TYPE = "| gate告警 |"  # gate 自动登记行的类型列专属标记（#723 闭环判据：防误闭环人工行）
 
 
@@ -124,6 +125,20 @@ def _append_rows(pool: Path, rows: list):
         pool_write_channel.commit_write(pool, "".join(buf), "append")
 
 
+def _close_line(line: str, note: str) -> str:
+    """未闭环 gate 行 → 闭环行（只改字符串，不读写，测试直接调）。
+
+    状态换成固定选项 ✅已闭环，闭环注记写进备注格——闭环后仍是七格规范行
+    （老写法把注记甩在收尾竖线之后，整行多出一格）。
+    """
+    body = line.replace(f"| {OPEN_STATUS} |", f"| {CLOSED_STATUS} |", 1).rstrip("\n")
+    head, sep, _tail = body.rpartition("|")
+    if not sep or "|" not in head:
+        return body + note + "\n"  # 不是表格行：注记跟在行尾
+    head = head.rstrip()
+    return head + (" " if head.endswith("|") else "；") + note + " |\n"
+
+
 def _close_rows(pool: Path, tag: str, keys: list) -> int:
     """把匹配 tag+keys 的未闭环 gate 行标闭环（跨 agent，#723 缺陷③）。
 
@@ -133,12 +148,11 @@ def _close_rows(pool: Path, tag: str, keys: list) -> int:
     closed = 0
     with pool_write_channel.pool_write_lock(pool):
         lines = _load_lines(pool)
-        today = datetime.now().strftime("%Y-%m-%d")
+        note = f"（{datetime.now().strftime('%Y-%m-%d')} persist gate pass 自动闭环）"
         for i, line in enumerate(lines):
             if not _is_open_row_for(line, tag, keys):
                 continue
-            lines[i] = (line.replace(f"| {OPEN_STATUS} |", "| ✅ |", 1).rstrip("\n")
-                        + f"（{today} persist gate pass 自动闭环）\n")
+            lines[i] = _close_line(line, note)
             closed += 1
         if closed:
             pool_write_channel.commit_write(pool, "".join(lines), "replace")
@@ -216,8 +230,12 @@ def check(params: dict, context: dict, agent: str) -> tuple:
 
 
 if __name__ == "__main__":
-    # CLI 调试：python3 persist_pool_ledger.py '<result_json>' '<context_json>'
+    # CLI 调试：python3 persist_pool_ledger.py '<result_json>' '<context_json>' [--agent <name>]
+    # B6（MEM#95841 同族）：本入口也是 agent 身份消费点——复用引擎的单点解析
+    # （NEXUS_AGENT env > --agent > cli），不再自带一份 env 兜底（防两处优先级漂移）。
     import json
-    _result = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {"failures": []}
-    _context = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
-    print(sync(_context, _result, agent=os.environ.get("NEXUS_AGENT", "cli")))
+    from nexusos_gate.gate_engine import _resolve_cli_agent
+    _agent, _argv = _resolve_cli_agent(sys.argv[1:])
+    _result = json.loads(_argv[0]) if len(_argv) > 0 else {"failures": []}
+    _context = json.loads(_argv[1]) if len(_argv) > 1 else {}
+    print(sync(_context, _result, agent=_agent))

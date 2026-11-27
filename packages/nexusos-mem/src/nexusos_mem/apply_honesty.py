@@ -563,6 +563,9 @@ def annotate_apply_attempt(
     # 阻塞主流程；调用方可检查返回值 error 字段决定是否重试）。
     activity_error = None
     _activity_id = None  # Task400: 接收 log_activity 返回的 id
+    # 2611230895：检索时放进场景坐标的会话号与检索词并进 detail——检索服务传了，原先落库这一步没接。
+    # task_id 写在单独的列，不重复。坐标里没有的项不加键，已有的键一个不动。
+    _coord_extra = {k: (current_coord or {}).get(k) for k in ("session_id", "query") if (current_coord or {}).get(k)}
     if log_activity and kb is not None:
         try:
             _activity_id = kb.log_activity(
@@ -580,6 +583,8 @@ def annotate_apply_attempt(
                     "source_coord_missing": source_missing,
                     "broken_links": broken_links,
                     "annotation": annotation,
+                    # 2611230895：场景坐标里的会话号与检索词（见上方 _coord_extra）
+                    **_coord_extra,
                 },
                 task_id=task_id,  # Task396 Step4: 写入 task_id 列（通电反查用）
             )
@@ -1102,6 +1107,10 @@ def auto_adjudicate_stale(kb, cutoff_days: int = 14, limit: int = 2000) -> Dict[
             exp_id=attempt["target_id"],
             result="not_applicable",
             evidence=EVID,
+            by="system/auto-adjudicate",  # 2611230944 甲-6
+            on_behalf=True,
+            entry="system",
+            system_flow="auto-adjudicate",  # 2611230960 乙：显式系统流程参数（不再靠 by 前缀）
         )
         if ret.get("ok"):
             adjudicated.append({"attempt_id": attempt["id"], "exp_id": attempt["target_id"]})
@@ -1143,3 +1152,125 @@ def auto_adjudicate_stale(kb, cutoff_days: int = 14, limit: int = 2000) -> Dict[
 
 if __name__ == "__main__":
     _self_test()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 2611230868（认知诚实闭环根修第一段）：机器名单与不连库纯函数
+# 判据只许机械可复核；被引用=任务产物出现经验编号（三种写法+5位裸编号）
+# ═══════════════════════════════════════════════════════════════════
+import re as _re_868
+
+# 2611230887：名单搬到 nexusos_mem.machine_identities（单一真源：shared.search 的默认值也要靠它）。
+# 这里保留同名导入，既有的 `from nexusos_mem.apply_honesty import MACHINE_AGENTS` 继续可用。
+# 原内联名单（不删，注释留档）：
+# MACHINE_AGENTS = {
+#     "nexus-monitor", "e2e-drill", "e2esuite", "e2e-suite",
+#     "nexus-monitor-aggregate", "e2e-suite-drill",
+#     # 2611230873 补全：熔炉/自测/门禁侧机器身份（不得冒充 Agent 记套用）
+#     "crucible", "crucible-trigger", "crucible-fragments",
+#     "e2e-i7-selfcheck", "e2e-suite-drill",
+# }
+from nexusos_mem.machine_identities import MACHINE_AGENTS  # noqa: E402,F401
+
+
+def is_machine_caller(agent_id, caller_kind=None, header_kind=None) -> bool:
+    """机器调用判定：caller_kind/X-Caller-Kind 声明仅对名单内身份生效
+    （名单外 Agent 带 machine 声明=试图缩小自己的套用分母，忽略，2611230875 乙-1）；
+    名单匹配 strip().lower()（乙-2）。"""
+    _a = (agent_id or "").strip().lower()
+    _in_list = _a in {n.strip().lower() for n in MACHINE_AGENTS}
+    if not _in_list:
+        return False
+    if caller_kind == "machine" or header_kind == "machine":
+        return True
+    return _in_list
+
+
+def cited_knowledge_ids(texts) -> set:
+    """从文本段抽取被引用的经验编号。认 MEM#12 / MEM-12 / knowledge/12 三种写法；
+    裸 #编号 只认五位数及以上（四位数及以下为未决池行号，设计上不认——甲-4 复核裁定写明不认）。编号两侧允许空格。"""
+    ids = set()
+    for t in texts or []:
+        if not t:
+            continue
+        _s = str(t)
+        for m in _re_868.finditer(r"MEM#\s*(\d+)", _s, _re_868.IGNORECASE):
+            ids.add(int(m.group(1)))
+        for m in _re_868.finditer(r"MEM-\s*(\d+)", _s, _re_868.IGNORECASE):
+            ids.add(int(m.group(1)))
+        for m in _re_868.finditer(r"knowledge/\s*(\d+)", _s, _re_868.IGNORECASE):
+            ids.add(int(m.group(1)))
+        # 2611230875 甲-2：认「经验 N」「MEM 第 N 条」「编号 N」
+        for m in _re_868.finditer(r"(?:经验|编号)\s*(\d{5,})", _s):
+            ids.add(int(m.group(1)))
+        for m in _re_868.finditer(r"MEM\s*第\s*(\d+)\s*条", _s, _re_868.IGNORECASE):
+            ids.add(int(m.group(1)))
+        # 2611230884 N-4：lookbehind 只排除 ASCII 字母数字下划线（\w 会把汉字也挡掉）；编号 0 不计入
+        for m in _re_868.finditer(r"(?<![A-Za-z0-9_])#\s*(\d{5,})", _s):
+            _n = int(m.group(1))
+            if _n > 0:
+                ids.add(_n)
+    return ids
+
+
+def judge_exposures(exposures, cited_ids) -> list:
+    """每条曝光一个判决：编号在被引用集合 → adopted（已采用、待给结果）；
+    不在 → not_used（判决内部名；写库值统一为 not_applicable，2611230873）。"""
+    out = []
+    for e in exposures or []:
+        eid = e.get("target_id") if isinstance(e, dict) else None
+        try:
+            eid = int(eid or (e.get("exp_id") if isinstance(e, dict) else None) or 0)
+        except (TypeError, ValueError):
+            eid = 0
+        # 2611230884 N-14：target_id 为空或编号 0 的曝光不参与判定（跳过）
+        if not eid:
+            continue
+        verdict = "adopted" if eid in cited_ids else "not_used"
+        out.append({"attempt_id": e.get("id") if isinstance(e, dict) else None,
+                    "target_id": eid, "verdict": verdict})
+    return out
+
+
+def bind_task(attempt, tasks):
+    """没带任务号的记录按「执行者名 + 时间窗」归任务。候选=同执行者且时间落在
+    [开始-120s, 结束+300s]；恰一个→归它；零个→不归；多个→不归（同窗多任务）。"""
+    import datetime as _dt_868
+
+    def _ts(v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        if not v:
+            return None
+        try:
+            return _dt_868.datetime.fromisoformat(str(v)).timestamp()
+        except (ValueError, TypeError):
+            return None
+
+    t = _ts(attempt.get("created") if isinstance(attempt, dict) else None)
+    if t is None:
+        return None
+    cands = []
+    for tk in tasks or []:
+        if not isinstance(tk, dict):
+            continue
+        if (tk.get("callee") or tk.get("executor")) != attempt.get("agent_id"):
+            continue
+        fn = _ts(tk.get("finished"))
+        # 2611230879：窗口起点=派单登记时刻(created)，终点=结束后 300s；
+        # 无 created 回退旧算法(开始前 120s)并在注释写明
+        st = _ts(tk.get("created"))
+        if st is None:
+            _st_ = _ts(tk.get("started"))
+            st = (_st_ - 120) if _st_ is not None else None
+        if st is None and fn is None:
+            continue
+        lo = st if st is not None else (fn - 7200)
+        hi = (fn + 300) if fn is not None else (st + 7200)
+        if lo <= t <= hi:
+            cands.append(tk)
+    if len(cands) == 1:
+        return {"task_id": cands[0].get("task_id"), "reason": "唯一候选"}
+    if not cands:
+        return None
+    return {"task_id": None, "reason": "同窗多任务"}

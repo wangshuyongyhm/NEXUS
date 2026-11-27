@@ -20,13 +20,19 @@ hybrid_search / use_zvec 参数均已移除）。
 
 import os
 import re
+import time
+import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path  # Task 282 P2-4: _load_term_dict 用 Path 读 config YAML
 from typing import Any, List, Optional
 
+import logging
+
 import psycopg2
 import psycopg2.extras
+
+logger = logging.getLogger("nexusos_mem.search")
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +83,32 @@ RERANK_SERVER_URL = os.environ.get("NEXUS_RERANK_URL", "http://127.0.0.1:11437")
 # 30（4 块）在串行批上把每次 /search 基线抬到 5s+，是本次 hang 的主因之一。
 rerank_pool = int(os.environ.get("NEXUS_RERANK_POOL", "16"))
 _rerank_down_until = 0.0
+_rerank_next_probe = 0.0          # 2611269944：冷却期里的探测口（每 _RERANK_PROBE_INTERVAL 放一次）
 _RERANK_COOLDOWN = 30.0
+
+# === 2611269944：重排的「冷却只留给服务坏了」与「单次延迟压下来」 ===
+# 旧行为（1604）：任何异常（含超时、含排队）都进 30 秒全局冷却 → 一次超时让之后 30 秒所有检索都不重排。
+# 新口径：只有「服务坏了」（拒绝连接/连接被重置/5xx/健康检查失败）才进冷却；超时与「忙」只降级这一次。
+_RERANK_PROBE_INTERVAL = float(os.environ.get("NEXUS_RERANK_PROBE_INTERVAL", "2"))
+# 复现旧语义（任何失败都冷却）：只用于「改前」对照测量与回滚，缺省关。
+_RERANK_LEGACY_COOLDOWN = os.environ.get("NEXUS_RERANK_LEGACY_COOLDOWN") == "1"
+# 送给重排的文本长度（标题 + 正文前 N 字符）。**缺省 500 = 与改造前完全一致**（2611269950 主控裁定）。
+# 想省时间可以设小（例如 300），但**有质量代价**：线上（服务端 max_len 512）实测 16 篇×300 字对 16 篇×500 字，
+# 前 3 条重合中位 0.67。2611269944 里报的「截短零损失」是伪一致——那次两臂都被服务端截到 300，已纠正。
+_RERANK_DOC_CHARS = int(os.environ.get("NEXUS_RERANK_DOC_CHARS", "500"))
+# 候选池大小（2611269949 主控裁定）：**缺省恒为 rerank_pool（16 篇，与改造前一致）**。
+# 为什么不做「按需要取」的缺省：没有带标注的集合能判断「少精排几篇」的好坏——重排的价值正是把
+# 融合分排在后面的相关篇目捞进前 3；实测候选 16→10 会让约三分之一查询的前 3 条发生变化
+# （正文 500→300 字符则是零损失）。想省时间的人显式打开：`NEXUS_RERANK_POOL_PER_TOP_K=N`
+# （>0 才生效：候选 = clamp(top_k×N, MIN_POOL, rerank_pool)），这是**有质量代价**的选项。
+_RERANK_POOL_PER_TOP_K = int(os.environ.get("NEXUS_RERANK_POOL_PER_TOP_K", "0"))
+_RERANK_MIN_POOL = int(os.environ.get("NEXUS_RERANK_MIN_POOL", "4"))
+# 「忙」的响应码（服务端锁等不到立刻回忙）+ Retry-After
+_RERANK_BUSY_CODES = (429, 503)
+# 可见性计数（进程内累计，只读快照给 rerank_stats()）
+_RERANK_STATS = {"attempt": 0, "applied": 0, "degraded": 0, "timeout": 0,
+                 "busy": 0, "broken": 0, "skipped_cooldown": 0, "skipped_disabled": 0}
+_RERANK_LAST = {"reason": "", "ms": 0.0}
 # Task1604: 2→0。rerank 是增值层（失败降级用原融合分，语义无损）；进程内锁
 # 串行 + 洪峰排队时重试只会把延迟放大 3 倍。单次尝试超时即降级，30s 冷却
 # 兜底持续故障（冷却期内直接跳过 rerank，零成本）。
@@ -161,64 +192,151 @@ def _get_bge_m3():
     return _BGE_M3_MODEL
 
 
-def _rerank_via_worker(query: str, pool: list) -> Optional[list]:
-    """Task 458: 调 :11437 rerank worker 精排 pool（list of row dict）。
+def _rerank_pool_size(top_k: int) -> int:
+    """候选池大小。**缺省恒为 `rerank_pool`（16 篇，与改造前完全一致）**（2611269949 主控裁定）。
 
-    失败返回 None（降级用原融合分）。重试 2 次 + 30s 冷却（对齐 _encode_via_worker）。
+    `NEXUS_RERANK_POOL_PER_TOP_K=N`（N>0）才「按需要取」：候选 = clamp(top_k×N, MIN_POOL, rerank_pool)。
+    那是**省时间的选项、有质量代价**——候选 16→10 时约三分之一查询的前 3 条会变（2611269944 量）；
+    正文 500→300 字符**同样不是零损失**（2611269949 在线上重测：前 3 重合中位 0.67，
+    2611269944 里那次「完全一致」是两臂都被服务端截到 300 的伪一致）。见 pool-default-check.md。
     """
-    global _rerank_down_until
-    import time
-    if _RERANK_DISABLED or not RERANK_ENABLED or time.time() < _rerank_down_until:
+    if _RERANK_POOL_PER_TOP_K <= 0:
+        return max(1, int(rerank_pool))          # 缺省：恒 16（不看 top_k）
+    want = max(int(top_k) * _RERANK_POOL_PER_TOP_K, _RERANK_MIN_POOL)
+    return max(1, min(int(rerank_pool), want))
+
+
+def rerank_stats() -> dict:
+    """2611269944：重排的累计计数（只读快照，给可见性与排查用）。"""
+    return dict(_RERANK_STATS, cooldown_remaining=round(max(0.0, _rerank_down_until - time.time()), 1),
+                last=dict(_RERANK_LAST), doc_chars=_RERANK_DOC_CHARS,
+                legacy_cooldown=_RERANK_LEGACY_COOLDOWN, pool_cap=rerank_pool)
+
+
+def _rerank_classify(exc) -> tuple:
+    """把一次失败分成「服务坏了」与「这一次不行」两类。返回 (kind, detail)。
+
+    - broken：拒绝连接 / 连接被重置 / 5xx / 其它未知错误 —— 只有这类才进全局冷却
+    - timeout：本机超时（服务可能只是忙/慢）—— 只降级这一次
+    - busy：服务端明确回「忙」（429/503，带 Retry-After）—— 只降级这一次
+    「未知错误」算 broken 是保守选择：宁可短暂少做重排，也不要在坏掉的服务上反复排队（且会留下日志）。
+    """
+    import socket
+    import urllib.error
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in _RERANK_BUSY_CODES:
+            return "busy", f"HTTP {exc.code}"
+        return "broken", f"HTTP {exc.code}"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "timeout", type(exc).__name__
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            return "timeout", f"URLError({type(reason).__name__})"
+        if isinstance(reason, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
+            return "broken", f"URLError({type(reason).__name__})"
+        return "broken", f"URLError({type(reason).__name__ if reason else 'unknown'})"
+    if isinstance(exc, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError)):
+        return "broken", type(exc).__name__
+    return "broken", type(exc).__name__
+
+
+def _rerank_via_worker(query: str, pool: list, meta: Optional[dict] = None) -> Optional[list]:
+    """Task 458 / 2611269944：调 :11437 rerank worker 精排 pool（list of row dict）。
+
+    失败返回 None（降级用原融合分）。2611269944 的三处改变：
+      ① **冷却只留给「服务坏了」**：只有拒绝连接 / 连接重置 / 5xx 才进 30s 冷却；
+         超时与「忙」（429/503）只让这一次降级，不连坐（`_RERANK_LEGACY_COOLDOWN=1` 可复现旧语义）。
+      ② **冷却期留探测口**：每 `_RERANK_PROBE_INTERVAL` 秒放一次请求出去，服务好了立刻恢复重排，
+         不把 30 秒变成硬等待。
+      ③ **文本按 `_RERANK_DOC_CHARS` 截短**（候选池大小由调用方按 top_k 取）。
+    `meta`（可选）收集本次的情况：applied / reason / ms / pool / doc_chars —— 给调用方回填 explain。
+    """
+    global _rerank_down_until, _rerank_next_probe
+    if meta is None:
+        meta = {}
+    meta.update({"applied": False, "reason": "not_attempted", "ms": 0.0,
+                 "pool": len(pool or []), "doc_chars": _RERANK_DOC_CHARS})
+    if _RERANK_DISABLED or not RERANK_ENABLED:
+        _RERANK_STATS["skipped_disabled"] += 1
+        meta["reason"] = "disabled"
         return None
     if not pool:
+        meta["reason"] = "empty_pool"
         return None
-    # 取每行 title + content 前 500 字符（reranker max 512 token）
+    now = time.time()
+    if now < _rerank_down_until:
+        # 冷却中：只有探测口到点才放行一次，其余直接降级（记「冷却中」这个原因）
+        if now < _rerank_next_probe:
+            _RERANK_STATS["skipped_cooldown"] += 1
+            meta["reason"] = "cooldown"
+            return None
+        _rerank_next_probe = now + _RERANK_PROBE_INTERVAL
+        meta["probe"] = True
+
     documents = [
-        (str(row.get("title", "")) + " " + str(row.get("content", ""))[:500]).strip()
+        (str(row.get("title", "")) + " " + str(row.get("content", ""))[:_RERANK_DOC_CHARS]).strip()
         for row in pool
     ]
-    last_err = None
-    for attempt in range(_RERANK_RETRIES + 1):
-        try:
-            import json
-            import urllib.request
-            req = urllib.request.Request(
-                f"{RERANK_SERVER_URL}/rerank",
-                data=json.dumps(
-                    {"query": query, "documents": documents, "top_n": len(pool)},
-                    ensure_ascii=False,
-                ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=_RERANK_TIMEOUT) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            results = payload.get("results")
-            if results and isinstance(results, list):
-                # 按返回的 index 重排 pool。1401-d5a：rerank 归一化分（sigmoid∈[0,1]）
-                # 以 _rerank_score 键【原地】附到 row 上（调用方需回写 final_score，
-                # 保持「返回顺序=score 降序」契约——原实现只重排不回写，E2E 实测
-                # 0.3032 排在 0.3123 前的顺序脱钩）。原地写而非改返回结构：外部
-                # 消费者（nexusos_xdr/test_fault_injection_596）断言返回值==row 列表。
-                out = []
-                for r in results:
-                    idx = r.get("index", -1)
-                    if not (0 <= idx < len(pool)):
-                        continue
-                    pool[idx]["_rerank_score"] = max(
-                        0.0, min(1.0, float(r.get("score", 0.0) or 0.0)))
-                    out.append(pool[idx])
-                return out
-            return None
-        except Exception as e:
-            last_err = e
-            if attempt < _RERANK_RETRIES:
-                time.sleep(_RERANK_RETRY_DELAYS[attempt])
-                continue
-    _rerank_down_until = time.time() + _RERANK_COOLDOWN
-    print(f"[WARN] rerank worker {_RERANK_RETRIES + 1}次重试全失败，"
-          f"进{_RERANK_COOLDOWN}s冷却: {last_err}", flush=True)
-    return None
+    _RERANK_STATS["attempt"] += 1
+    t0 = time.time()
+    try:
+        import json
+        import urllib.request
+        req = urllib.request.Request(
+            f"{RERANK_SERVER_URL}/rerank",
+            data=json.dumps(
+                {"query": query, "documents": documents, "top_n": len(pool)},
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=_RERANK_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        results = payload.get("results")
+        if results and isinstance(results, list):
+            out = []
+            for r in results:
+                idx = r.get("index", -1)
+                if not (0 <= idx < len(pool)):
+                    continue
+                pool[idx]["_rerank_score"] = max(
+                    0.0, min(1.0, float(r.get("score", 0.0) or 0.0)))
+                out.append(pool[idx])
+            if not out:
+                _RERANK_STATS["degraded"] += 1
+                meta["reason"] = "empty_response"
+                return None
+            _RERANK_STATS["applied"] += 1
+            _rerank_down_until = 0.0          # 成功即解除冷却（探测口通了就恢复）
+            meta["applied"] = True
+            meta["reason"] = "ok"
+            meta["ms"] = round((time.time() - t0) * 1000, 1)
+            _RERANK_LAST.update({"reason": "ok", "ms": meta["ms"]})
+            return out
+        _RERANK_STATS["degraded"] += 1
+        meta["reason"] = "empty_response"
+        return None
+    except Exception as e:  # noqa: BLE001 — 重排是增值层，任何失败都只能降级，不能影响检索
+        kind, detail = _rerank_classify(e)
+        meta["ms"] = round((time.time() - t0) * 1000, 1)
+        meta["reason"] = kind
+        meta["detail"] = detail
+        _RERANK_LAST.update({"reason": kind, "ms": meta["ms"]})
+        _RERANK_STATS[kind] = _RERANK_STATS.get(kind, 0) + 1
+        _RERANK_STATS["degraded"] += 1
+        # 旧语义（测量/回滚用）：任何失败都冷却
+        if _RERANK_LEGACY_COOLDOWN or kind == "broken":
+            _rerank_down_until = time.time() + _RERANK_COOLDOWN
+            _rerank_next_probe = time.time() + _RERANK_PROBE_INTERVAL
+            print(f"[WARN] rerank worker 不可用（{kind}: {detail}），"
+                  f"进{_RERANK_COOLDOWN:.0f}s冷却（冷却中每{_RERANK_PROBE_INTERVAL:.0f}s放一次探测）",
+                  flush=True)
+        else:
+            print(f"[WARN] rerank worker 本次降级（{kind}: {detail}），不冷却（冷却只留给服务坏了）",
+                  flush=True)
+        return None
 
 
 def _encode_via_worker(text: str) -> Optional[list]:
@@ -400,6 +518,12 @@ _TYPE_PRIOR = {
 }
 
 
+def exclude_failed_condition(include_failed: bool = False) -> str:
+    """2611230871: 已判失败的经验默认不返回（截断前的候选条件）。
+    include_failed=True（排查用）时返回空串=不排除。"""
+    return "" if include_failed else " AND COALESCE(outcome, '') <> 'failed'"
+
+
 def pgvector_search(
     conn,
     query: str,
@@ -419,6 +543,7 @@ def pgvector_search(
     graph_mode: str = "annotate",
     readmodel: bool = False,
     include_semantic: bool = False,
+    include_failed: bool = False,
 ) -> List[dict]:
     """task 253 P1-3: 真·混合检索（向量 ∪ FTS 并集融合 + 父文档去重）。
 
@@ -514,6 +639,8 @@ def pgvector_search(
                         "'counterexample','finding','decision')")
     elif pool == "document":
         where_extra += " AND knowledge_type = 'document'"
+    _where_failed = exclude_failed_condition(include_failed)
+    where_extra += _where_failed
 
     merged: dict = {}
 
@@ -691,9 +818,11 @@ def pgvector_search(
     # ---- Task 458: Reranker 精排（cross-encoder）----
     # 在 fusion sort 后、父文档去重前对 top-pool 精排。
     # 失败降级（_rerank_via_worker 返 None，跳过用原融合分）。
+    _rr_meta = {"applied": False, "reason": "skipped", "ms": 0.0, "pool": 0, "doc_chars": 0}
     if RERANK_ENABLED and len(results) > top_k:
-        pool = results[:rerank_pool]
-        reranked = _rerank_via_worker(query, pool)
+        _pool_cap = _rerank_pool_size(top_k)          # 2611269949：缺省恒 16；按需要取要显式开环境变量
+        pool = results[:_pool_cap]
+        reranked = _rerank_via_worker(query, pool, _rr_meta)
         if reranked:
             # 1401-d5a 契约修正（二轮）：rerank 回写归一化相关性分后【再乘
             # type_prior 并重排】——第一版「精排让位相关性」实测证伪：reranker
@@ -715,7 +844,16 @@ def pgvector_search(
                 _exp["rank_method"] = "weighted_fusion_v3+rerank×prior"
                 _row["explain"] = _exp
             reranked.sort(key=lambda x: float(x.get("final_score", 0.0) or 0.0), reverse=True)
-            results = reranked + results[rerank_pool:]
+            results = reranked + results[_pool_cap:]
+
+    # ---- 2611269944：可见性——这次有没有重排、花了多久、为什么没重排 ----
+    # 挂在每行的 explain 里（explain 已是既有字段，加子键是增量改动）；API 调用方原样透传。
+    for _row in results:
+        _exp = _row.get("explain")
+        if not isinstance(_exp, dict):
+            _exp = {}
+        _exp["rerank"] = dict(_rr_meta)
+        _row["explain"] = _exp
 
     # ---- 父文档去重：同一文档的多个 chunk 只保留最高分 ----
     seen_parents = set()
@@ -905,9 +1043,26 @@ def _or_tsquery(tokenized: str) -> str:
     """词元 OR 拼接的 to_tsquery 字面量；无合法词元返回 ''（调用侧退回 AND）。"""
     return " | ".join(f"'{t}'" for t in _or_tsquery_parts(tokenized))
 
-def pg_fts_search(
-    conn,
+WINDOW_BOUND_SENTINEL = "__NEXUS_WINDOW_BOUND__"
+
+
+def fts_split_enabled() -> bool:
+    """2611269916：全文检索候选集拆分开关（**缺省开**）。
+
+    False → 旧语句（逐字节不变），回滚 = `NEXUS_FTS_SPLIT=0` + 重启服务。
+    env 现读现判（与 `tokenize_zh.jieba_enabled` 同口径，切开关不用改代码）。
+    """
+    return os.environ.get("NEXUS_FTS_SPLIT", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _substr_chars(query: str) -> int:
+    """可用字符数（去空白）。短查询 = 少于 3 个字符：三元组切不出内部三元组，索引帮不上忙。"""
+    return len(re.sub(r"\s+", "", query or ""))
+
+
+def build_fts_sql(
     query: str,
+    include_failed: bool = False,
     top_k: int = 5,
     knowledge_type: Optional[str] = None,
     project: Optional[str] = None,
@@ -916,22 +1071,21 @@ def pg_fts_search(
     core_only: bool = False,
     pool: str = "all",
     graph_expand: bool = False,
-) -> List[dict]:
-    """PostgreSQL 全文搜索（FTS）+ ILIKE 子串匹配（中文补充）。
+) -> dict:
+    """拼出全文检索的语句与参数（**单一真源**：pg_fts_search 与基准/对比脚本共用）。
 
-    Args:
-        conn: psycopg2 连接
-        query: 搜索文本
-        knowledge_type/project/tag: 可选过滤条件
-        graph_expand: task 1455 一跳扩展开关——True 时放宽 superseded 过滤
-            （与 pgvector_search 向量路同口径，两路行为必须一致，否则
-            "并集"里 FTS 独有命中永远见不到旧条）
+    2611269916 三态（`mode` 字段）：
+      old          旧语句，**逐字节不变**——开关关 / 分词关 / 退化查询（无合法词元）时
+      old-short    旧语句——**短查询（可用字符 < 3）刻意不走近道**：三元组索引对 2 字以内的模式
+                   切不出内部三元组，而词元前缀匹配对 ILIKE 的覆盖率实测只有 ~10%（前 100 条），
+                   逐字前缀候选也只有 89.1% 中位数（<95% 的验收线）。降标准不如不改，留给主控裁定
+                   （见 output/files/parity-report.md §短查询）
+      split-long   四个条件各一支（两个 GIN 全文索引 + title/content 三元组索引），UNION 去重后
+                   回表算 rank/tok_hits —— 候选集合与旧语句的 OR 完全相同
 
-    Returns:
-        [{"id", "title", ..., "rank", "source"="pg_fts"}, ...]
+    新形态与旧语句的候选集合相同（词元 OR 子串，UNION 去重），排序/分页/过滤/rank/tok_hits 算法不变。
+    返回 {"sql","params","mode","fallback_sql","fallback_params"}。
     """
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
     ilike_condition = "(title ILIKE %s OR content ILIKE %s)"
     # task/1452: 中文 FTS jieba 双轨——查询侧与写入侧共用 tokenize_zh 同源分词
     # （两侧词表不一致=词级匹配失效，1449 草稿 §2.3 命门）。flag on：query 分词后
@@ -939,7 +1093,9 @@ def pg_fts_search(
     # rank 同步双列 GREATEST；flag off：原串+单列条件，SQL 与改造前逐字节一致
     # （双轨灰度回滚生命线）。ILIKE 恒用原始 query——分词插空格破坏连续子串语义。
     from nexusos_mem.tokenize_zh import jieba_enabled as _fts_jieba_on, tokenize_for_query as _tok_query
-    if _fts_jieba_on():
+    _jieba_on = _fts_jieba_on()
+    _tsq = ""
+    if _jieba_on:
         fts_query = _tok_query(query)
         # 2611111772 F2（1755 诊断 ★★★）：plainto_tsquery 是 AND 语义——
         # 2-7 词元须同行全中，中文实测 0-1 行候选=零召回主因。改词元 OR
@@ -986,6 +1142,8 @@ def pg_fts_search(
                         "'counterexample','finding','decision')")
     elif pool == "document":
         where_extra += " AND knowledge_type = 'document'"
+    _where_failed = exclude_failed_condition(include_failed)
+    where_extra += _where_failed
 
     # task 1455: graph_expand 同口径放宽（与向量路一致，见 pgvector_search）
     _sup_filter = "" if graph_expand else " AND superseded_by IS NULL"
@@ -1001,7 +1159,7 @@ def pg_fts_search(
     # 查询 ladder 退化恒 0/1，等价旧排序。词元内联字面量（白名单已消毒无引号）。
     _tok_ladder = ""
     _order_head = "rank DESC"
-    if _fts_jieba_on() and _tsq:
+    if _jieba_on and _tsq:
         _parts = _or_tsquery_parts(fts_query)
         if len(_parts) >= 2:
             _hits = [f"(CASE WHEN search_vector_zh @@ to_tsquery('simple', '{t}')"
@@ -1009,31 +1167,385 @@ def pg_fts_search(
                      for t in _parts]
             _tok_ladder = ",\n               (" + " + ".join(_hits) + ") AS tok_hits"
             _order_head = "tok_hits DESC, rank DESC"
-    sql = f"""
-        SELECT id, title, content, source_agent, tags, project, task_id,
-               knowledge_type, shadow_code, confidence, created, path,
-               context_coord, outcome, ref_count, updated,
-               GREATEST(
-                    {rank_fts},
-                    CASE WHEN title ILIKE %s OR content ILIKE %s THEN 0.5 ELSE 0 END,
-                    CASE WHEN knowledge_type IN ('experience','finding','decision','pitfall')
-                         THEN 0.15 ELSE 0 END
-                ) AS rank{_tok_ladder}
-        FROM knowledge
-        WHERE ({fts_condition} OR {ilike_condition})
-          {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}
-        ORDER BY {_order_head}, id DESC
-        LIMIT %s OFFSET %s
-    """
-    # 参数序：GREATEST（rank_fts 1-2 个 + ILIKE 2 个）→ WHERE（fts_condition 1-2 个 + ILIKE 2 个）
-    params = [*fts_params, f"%{query}%", f"%{query}%",  # GREATEST
-              *fts_params,  # FTS（WHERE）
-              f"%{query}%", f"%{query}%",  # ILIKE（WHERE）
-              ] + params_extra + [top_k, offset]
 
-    cur.execute(sql, params)
-    results = [dict(row) for row in cur.fetchall()]
+    _cols = ("id, title, content, source_agent, tags, project, task_id,\n"
+             "               knowledge_type, shadow_code, confidence, created, path,\n"
+             "               context_coord, outcome, ref_count, updated,")
+    _rank_block = ("GREATEST(\n"
+                   f"                    {rank_fts},\n"
+                   "                    CASE WHEN title ILIKE %s OR content ILIKE %s THEN 0.5 ELSE 0 END,\n"
+                   "                    CASE WHEN knowledge_type IN ('experience','finding','decision','pitfall')\n"
+                   "                         THEN 0.15 ELSE 0 END\n"
+                   f"                ) AS rank{_tok_ladder}")
+
+    # ── 旧语句：逐字节保留（开关关 / 分词关 / 退化查询都走这里）──────────────
+    sql_old = (f"\n        SELECT {_cols}\n"
+               f"               {_rank_block}\n"
+               f"        FROM knowledge\n"
+               f"        WHERE ({fts_condition} OR {ilike_condition})\n"
+               f"          {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}\n"
+               f"        ORDER BY {_order_head}, id DESC\n"
+               f"        LIMIT %s OFFSET %s\n"
+               f"    ")
+    # 参数序：GREATEST（rank_fts 1-2 个 + ILIKE 2 个）→ WHERE（fts_condition 1-2 个 + ILIKE 2 个）
+    params_old = [*fts_params, f"%{query}%", f"%{query}%",  # GREATEST
+                  *fts_params,  # FTS（WHERE）
+                  f"%{query}%", f"%{query}%",  # ILIKE（WHERE）
+                  ] + params_extra + [top_k, offset]
+
+    # 2611269917：给「窗口近路」与「rank>0.5 例外守卫」备好语句（同一处拼，避免三份口径）
+    # 窗口语句 = 旧语句 + `AND id > %s`（只扫最新的一段）；占位值先放 BOUND 哨兵，
+    # 由调用方按窗口宽度替换（哨兵是字符串，真漏替换也只会让 SQL 报错，不会静默算错）。
+    _win_where = f"  {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra} AND id > %s"
+    window_sql = (f"\n        SELECT {_cols}\n"
+                  f"               {_rank_block}\n"
+                  f"        FROM knowledge\n"
+                  f"        WHERE ({fts_condition} OR {ilike_condition})\n"
+                  f"{_win_where}\n"
+                  f"        ORDER BY {_order_head}, id DESC\n"
+                  f"        LIMIT %s OFFSET %s\n"
+                  f"    ")
+    window_params = ([*fts_params, f"%{query}%", f"%{query}%",
+                      *fts_params, f"%{query}%", f"%{query}%"]
+                     + params_extra + [WINDOW_BOUND_SENTINEL, None, None])
+    if len(fts_params) < 2:      # 分词关：没有词元轨，窗口近路无从判据 → 不给窗口语句
+        window_sql, window_params = None, None
+    # rank>0.5 例外守卫：只有词元支能超过 0.5（子串支的 0.5 是 CASE 常量），所以只查两个词元列，
+    # 各自单独一支（单列 → GIN 索引可用），只数「窗口之外」的行。
+    guard_sql = (f"\n        SELECT count(*) FROM (\n"
+                 f"            SELECT id FROM knowledge\n"
+                 f"            WHERE search_vector_zh @@ to_tsquery('simple', %s)\n"
+                 f"              AND ts_rank(search_vector_zh, to_tsquery('simple', %s)) > 0.5\n"
+                 f"              AND id <= %s {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}\n"
+                 f"            UNION\n"
+                 f"            SELECT id FROM knowledge\n"
+                 f"            WHERE search_vector @@ to_tsquery('simple', %s)\n"
+                 f"              AND ts_rank(search_vector, to_tsquery('simple', %s)) > 0.5\n"
+                 f"              AND id <= %s {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}\n"
+                 f"        ) _g\n    ")
+    # 守卫语句要两个词元列各一个 tsquery 参数 —— 分词关（fts_params 只有一个值）时没有这个词元支，
+    # 也不会有窗口近路，直接把守卫置空（调用方 _window_shortcut 会因 window_sql 为 None 直接放弃）。
+    if len(fts_params) >= 2:
+        guard_sql, guard_params = guard_sql, [fts_params[0], fts_params[0], WINDOW_BOUND_SENTINEL] \
+            + params_extra + [fts_params[1], fts_params[1], WINDOW_BOUND_SENTINEL] + params_extra
+    else:
+        guard_sql, guard_params = None, None
+
+    if not (_jieba_on and _tsq and fts_split_enabled()):
+        return {"sql": sql_old, "params": params_old, "mode": "old",
+                "fallback_sql": sql_old, "fallback_params": params_old,
+                "tokens_n": len(_or_tsquery_parts(fts_query)) if (_jieba_on and _tsq) else 0,
+                "has_tok_hits": False, "window_sql": None, "window_params": None,
+                "guard_sql": None, "guard_params": None}
+    if _substr_chars(query) < 3:
+        # 短查询：三元组索引用不上，词元前缀的召回覆盖率实测 < 验收线（见 docstring / parity-report）。
+        # 宁可这一条继续慢，也不把该召回的漏掉；要不要给大对象建二元组索引由主控裁定。
+        logger.debug("[2611269916] 短查询走旧语句（%r，可用字符 <3）", query)
+        return {"sql": sql_old, "params": params_old, "mode": "old-short",
+                "fallback_sql": sql_old, "fallback_params": params_old,
+                "tokens_n": len(_or_tsquery_parts(fts_query)) if (_jieba_on and _tsq) else 0,
+                "has_tok_hits": bool(_tok_ladder),
+                "window_sql": window_sql, "window_params": window_params,
+                "guard_sql": guard_sql, "guard_params": guard_params}
+
+    # ── 新形态：每个条件单独一支，各走自己的索引 ────────────────────────────
+    # 为什么不是「词元一支 + 子串一支」两支：词元支里的 `zh @@ q OR vec @@ q` 两列 OR，
+    # 优化器估出 7% 选择率 → 选 Seq Scan（实测 766ms/766k 缓冲页）。拆成单列单支后
+    # 每支都是 Bitmap Index Scan（zh 24.6ms / vec 5.3ms），UNION 去重后候选集合与旧
+    # 语句的 OR 完全相同（这是等价变换，不是放宽/收紧）。
+    _filt = f" {_sup_filter} AND COALESCE(deprecated, FALSE) = FALSE{where_extra}"
+    sql_new = (f"\n        WITH cand AS MATERIALIZED (\n"
+               f"            SELECT id FROM knowledge\n"
+               f"            WHERE search_vector_zh @@ to_tsquery('simple', %s){_filt}\n"
+               f"            UNION\n"
+               f"            SELECT id FROM knowledge\n"
+               f"            WHERE search_vector @@ to_tsquery('simple', %s){_filt}\n"
+               f"            UNION\n"
+               f"            SELECT id FROM knowledge\n"
+               f"            WHERE title ILIKE %s{_filt}\n"
+               f"            UNION\n"
+               f"            SELECT id FROM knowledge\n"
+               f"            WHERE content ILIKE %s{_filt}\n"
+               f"        )\n"
+               f"        SELECT {_cols}\n"
+               f"               {_rank_block}\n"
+               f"        FROM knowledge\n"
+               f"        WHERE id IN (SELECT id FROM cand)\n"
+               f"        ORDER BY {_order_head}, id DESC\n"
+               f"        LIMIT %s OFFSET %s\n"
+               f"    ")
+    # 2611269917：参数顺序严格按**语句文本里 %s 出现的先后**排（CTE 四支在前、主查询的 rank 在后）。
+    # 上一单按「先主查询后四支」排，只因同一占位符的值恰好相同才对得上——这一单改成文本序，
+    # 并由 test_fts_cut2.py 的「把参数按序填回文本」测试锁住。
+    params_new = ([fts_params[0]] + params_extra                      # 支1：zh + 该支过滤
+                  + [fts_params[1]] + params_extra                    # 支2：vec
+                  + [f"%{query}%"] + params_extra                     # 支3：title ILIKE
+                  + [f"%{query}%"] + params_extra                     # 支4：content ILIKE
+                  + [*fts_params, f"%{query}%", f"%{query}%"]         # 主查询 rank（ts_rank×2 + ILIKE×2）
+                  + [top_k, offset])
+    mode = "split-long"
+    return {"sql": sql_new, "params": params_new, "mode": mode,
+            "fallback_sql": sql_old, "fallback_params": params_old,
+            "tokens_n": len(_or_tsquery_parts(fts_query)) if (_jieba_on and _tsq) else 0,
+            "has_tok_hits": bool(_tok_ladder),
+            "window_sql": window_sql, "window_params": window_params,
+            "guard_sql": guard_sql, "guard_params": guard_params}
+
+
+WINDOW_SIZES = (2000, 8000, 32000)   # 2611269917：窗口近路的窗口宽度（依次放大，放到全表之前就放弃）
+_PLAN_CACHE_MAX = 256                # 「走哪条路」的缓存上限（查询原文+过滤 -> 计划里有没有顺序扫）
+_PLAN_ROUTE_CACHE: dict = {}
+
+
+def fts_shortcut_enabled() -> bool:
+    """2611269917：窗口近路 + 计划守卫的总开关（**缺省开**）。
+
+    关掉 = 回到 2611269916 的行为（长查询四支、短查询旧语句），用于对照与回滚。
+    env 现读现判（与 jieba/split 两个开关同口径）。
+    """
+    return os.environ.get("NEXUS_FTS_SHORTCUT", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _restore_statement_timeout(conn, timeout_ms=None):
+    """2611269944：回滚之后把语句超时重新设上。
+
+    为什么需要：回滚会撤掉本事务里先前 `SET statement_timeout` 的效果（主控实测：设 1234 → 出错回滚 → SHOW 是 0），
+    退回旧语句的那一路于是失去预算保护——正是「检索挂死」要防的东西。超时值可注入，缺省与检索预算一致。
+    重设失败只记日志（不能让检索崩），但必须留下痕迹——不许静默。
+    """
+    ms = _SEARCH_PG_TIMEOUT_MS if timeout_ms is None else int(timeout_ms)
+    try:
+        _c = conn.cursor()
+        try:
+            _c.execute("SET statement_timeout = %s", (ms,))
+        finally:
+            _c.close()
+        return ms
+    except Exception as _e_restore:  # noqa: BLE001 — 重设失败不抛，但要留日志
+        logger.warning("[2611269944] 退路重设语句超时失败（预算 %sms 未生效）: %s: %s",
+                       ms, type(_e_restore).__name__, str(_e_restore).splitlines()[0][:120])
+        return None
+
+
+def _bound_params(params, bound, limit=None, offset=None):
+    """把窗口语句里的 BOUND 哨兵换成真实 id 边界（给了 limit 就顺带换末尾的 LIMIT/OFFSET）。
+
+    参数按语句文本里的出现顺序排（2611269917 的纪律），这里只做「同位替换」，不重排。
+    """
+    out = [bound if p == WINDOW_BOUND_SENTINEL else p for p in params]
+    if limit is not None:
+        out[-2], out[-1] = limit, offset
+    return out
+
+
+def _first_value(row):
+    """RealDictCursor / 普通游标两种返回形状都取出第一个值。"""
+    if isinstance(row, dict):
+        return next(iter(row.values()))
+    return row[0]
+
+
+def _plan_probe(cur, sql, params):
+    """EXPLAIN (FORMAT JSON) → (knowledge 上有没有顺序扫, 顶层 Total Cost)。
+
+    只看计划、不执行（EXPLAIN 不带 ANALYZE）；解析失败按「有顺序扫、代价无穷」处理，
+    让调用方退到旧语句（默认值落在不冒险的一侧）。
+    """
+    cur.execute("EXPLAIN (FORMAT JSON) " + sql, params)
+    plan = _first_value(cur.fetchone())
+    if isinstance(plan, str):
+        plan = json.loads(plan)
+    if isinstance(plan, list):
+        plan = plan[0]
+    total = float(plan.get("Total Cost") or 0.0) if isinstance(plan, dict) else 0.0
+    node = plan.get("Plan") if isinstance(plan, dict) else None
+
+    def walk(n):
+        if not isinstance(n, dict):
+            return False
+        if (str(n.get("Node Type", "")) == "Seq Scan"
+                and str(n.get("Relation Name", "")) == "knowledge"):
+            return True
+        return any(walk(child) for child in (n.get("Plans") or []))
+
+    return walk(node), total
+
+
+def _plan_has_seq_scan_knowledge(cur, sql, params) -> bool:
+    """只问「有没有顺序扫」（给测试与外部调用留的薄封装）。"""
+    return _plan_probe(cur, sql, params)[0]
+
+
+def _window_shortcut(cur, built, top_k, offset, route_sink=None):
+    """近路一：并列最新 → 只扫最新的一段。判据成立返回行（可直接用），不成立返回 None。
+
+    判据（任务书 references §3，成立才允许直接返回；不成立就是「不确定」，必须放大窗口或放弃）：
+      ① 窗口里取到至少 R = offset + top_k 行；
+      ② 窗口内第 R 行的 rank == 0.5；
+      ③ 多词元查询里该行 tok_hits == n（tok_hits 不可能超过 n；单词元查询这一条恒真）；
+      ④ 窗口**之外**没有 rank > 0.5 的行（守卫语句按词元列单列各一支，走 GIN 索引数）。
+    为什么够：窗口外的行 id 更小，并列时一定排在窗口内行之后；要挤到第 R 行之前，
+    它的 (tok_hits, rank) 必须更大 —— tok_hits ≤ n 被 ③ 封住，唯一出口是 rank > 0.5，由 ④ 兜住。
+    """
+    if not built.get("window_sql") or int(built.get("tokens_n") or 0) <= 0:
+        return None
+    cur.execute("SELECT max(id) FROM knowledge")
+    max_id = int(_first_value(cur.fetchone()) or 0)
+    if not max_id:
+        return None
+    r_need = int(offset) + int(top_k)
+    n_tok = int(built["tokens_n"])
+    for width in WINDOW_SIZES:
+        bound = max_id - width
+        cur.execute(built["window_sql"], _bound_params(built["window_params"], bound, r_need, 0))
+        rows = [dict(r) for r in cur.fetchall()]
+        if len(rows) < r_need:
+            logger.debug("[2611269917] 近路一 W=%s 只有 %s 行（需要 %s），放大窗口", width, len(rows), r_need)
+            continue
+        last = rows[r_need - 1]
+        if abs(float(last.get("rank") or 0.0) - 0.5) > 1e-9:
+            # 不是「并列最新」（按档位排），近路一不适用 —— 交给近路二
+            return None
+        if built.get("has_tok_hits") and int(last.get("tok_hits") or 0) != n_tok:
+            return None
+        cur.execute(built["guard_sql"], _bound_params(built["guard_params"], bound))
+        n_over = int(_first_value(cur.fetchone()) or 0)
+        if n_over:
+            # 窗口外还有 rank>0.5 的行 —— 判据不成立，不将就，交给近路二（任务书 §8 点名）
+            logger.info("[2611269917] 近路一 W=%s 放弃：窗口外有 %s 行 rank>0.5", width, n_over)
+            return None
+        if route_sink is not None:
+            route_sink["route"] = f"window-{width}"
+        return rows[int(offset):int(offset) + int(top_k)]
+    return None
+
+
+def pg_fts_search(
+    conn,
+    query: str,
+    include_failed: bool = False,
+    top_k: int = 5,
+    knowledge_type: Optional[str] = None,
+    project: Optional[str] = None,
+    tag: Optional[str] = None,
+    offset: int = 0,
+    core_only: bool = False,
+    pool: str = "all",
+    graph_expand: bool = False,
+    route_sink: Optional[dict] = None,
+) -> List[dict]:
+    """PostgreSQL 全文搜索（FTS）+ ILIKE 子串匹配（中文补充）。
+
+    2611269916 把「四条件同层 OR」拆成四支各走索引；2611269917 再加两道近路 + 修退路：
+      近路一（窗口）：排序是 `tok_hits DESC, rank DESC, id DESC`，模糊匹配命中的行并列 0.5、
+                      并列按 id 倒序 —— 对「并列最新」的查询只扫最新的一段（判据见 _window_shortcut）。
+      近路二（计划）：先 EXPLAIN，四支语句只要在 knowledge 上出现顺序扫，就直接跑旧语句（不再变慢）。
+      退路：新语句**形状**出错时先回滚事务再执行旧语句（psycopg2 一条语句出错后事务即中止，
+            不回滚后续语句全被拒）；超时/连接类异常照旧往上抛，不吞。
+
+    Args:
+        conn: psycopg2 连接
+        query: 搜索文本
+        knowledge_type/project/tag: 可选过滤条件
+        route_sink: 可选，传入一个 dict 收集本次实际走的路（`route_sink["route"]`，给基准/召回脚本用）
+
+    Returns:
+        [{"id", "title", ..., "rank", "source"="pg_fts"}, ...]
+    """
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    built = build_fts_sql(
+        query, include_failed=include_failed, top_k=top_k,
+        knowledge_type=knowledge_type, project=project, tag=tag, offset=offset,
+        core_only=core_only, pool=pool, graph_expand=graph_expand,
+    )
+    route = built["mode"]
+    results = None
+
+    # ── 路由（2611269917）──────────────────────────────────────────────────
+    # 短查询（old-short）：窗口近路是它唯一的快速路径，先试；判据不成立就照旧走旧语句。
+    # 长查询（split-long）：先花约 1ms 看计划 —— 计划干净就直接用四支（不试窗口，省掉窗口扫描的额外开销）；
+    #   计划要吃顺序扫才试窗口近路，仍不成立就退回旧语句。两个等价语句都可用时按计划代价挑更便宜的，
+    #   这样「比修复前慢」的空间被压到计划估算误差以内。
+    _sink = route_sink if route_sink is not None else {}
+    if fts_shortcut_enabled() and built["mode"] == "old-short":
+        results = _window_shortcut(cur, built, top_k, offset, _sink)
+        if results is not None:
+            route = _sink.get("route", "window")
+
+    if results is None:
+        sql_run, params_run = built["sql"], built["params"]
+        if fts_shortcut_enabled() and built["mode"] == "split-long":
+            _ck = (query, include_failed, top_k, knowledge_type, project, tag, offset,
+                   core_only, pool, graph_expand)
+            _cached = _PLAN_ROUTE_CACHE.get(_ck)
+            if _cached is None:
+                try:
+                    # 判据（2611269917 的「永不变慢」口径）：**旧语句自己不吃顺序扫就一律用旧语句**
+                    # —— 那是修复前的形态，等于把「不比修复前慢」变成结构保证，而不是估算赌博。
+                    # 旧语句要吃顺序扫（修复前就是慢的那一类）才考虑换：先窗口近路，再四支。
+                    _seq_old, _cost_old = _plan_probe(cur, built["fallback_sql"], built["fallback_params"])
+                    if not _seq_old:
+                        _cached = "old-fast"      # 旧语句走索引 → 保持修复前形态（不冒估算误差的险）
+                    else:
+                        _seq_new, _cost_new = _plan_probe(cur, built["sql"], built["params"])
+                        _cached = "old" if _seq_new else "split"
+                except Exception as _e_plan:  # noqa: BLE001 — 看计划失败不能影响检索
+                    # 2611269944：EXPLAIN 在服务端出错会让事务中止（psycopg2 的「事务已中止」是 InternalError），
+                    # 所以这里必须先回滚、并**直接改用旧语句**——新语句的形状已经证明有问题，不必再去执行它。
+                    logger.warning("[2611269944] EXPLAIN 失败（回滚后直接用旧语句）: %s: %s",
+                                   type(_e_plan).__name__, str(_e_plan).splitlines()[0][:120])
+                    _rolled = False
+                    try:
+                        conn.rollback()
+                        _rolled = True
+                    except Exception as _e_rb:  # noqa: BLE001
+                        logger.warning("[2611269944] 看计划失败后回滚也失败: %s", type(_e_rb).__name__)
+                    _restore_statement_timeout(conn)
+                    _cached = "plan-error-old" if _rolled else "old"
+                if len(_PLAN_ROUTE_CACHE) >= _PLAN_CACHE_MAX:
+                    _PLAN_ROUTE_CACHE.clear()
+                _PLAN_ROUTE_CACHE[_ck] = _cached
+            if _cached == "plan-error-old":
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                sql_run, params_run, route = (built["fallback_sql"], built["fallback_params"],
+                                              "plan-error-old")
+            elif _cached == "old-fast":
+                sql_run, params_run, route = built["fallback_sql"], built["fallback_params"], "old-fast"
+            elif _cached == "old":
+                results = _window_shortcut(cur, built, top_k, offset, _sink)
+                if results is not None:
+                    route = _sink.get("route", "window")
+                else:
+                    sql_run, params_run, route = (built["fallback_sql"], built["fallback_params"],
+                                                  "plan-guard-old")
+            else:
+                route = "split-long"
+
+        try:
+            cur.execute(sql_run, params_run)
+            results = [dict(row) for row in cur.fetchall()]
+        except (psycopg2.ProgrammingError, psycopg2.InternalError) as _e_split:
+            # 2611269944：psycopg2 2.9.12 里「事务已中止」(InFailedSqlTransaction) 是 InternalError 的子类，
+            # 不是 ProgrammingError —— 只接 ProgrammingError 的退路接不住它（主控验收时查到的缺陷）。
+            if route in ("old", "old-short", "plan-guard-old", "old-fast", "plan-error-old"):
+                cur.close()
+                raise
+            _first = str(_e_split).strip().splitlines()[0][:180] if str(_e_split).strip() else ""
+            logger.warning(
+                "[2611269917] 新语句形态 %s 执行失败，退回旧语句（回滚后执行旧语句，本条会慢，但不吞异常）: %s",
+                route, _first,
+            )
+            # psycopg2：一条语句出错后事务即中止，不回滚后面任何语句都会被拒（2611269917 修）
+            conn.rollback()
+            # 2611269944：回滚会撤掉先前 SET 的语句超时 —— 退路之前必须重设，否则退路本身没预算
+            _restore_statement_timeout(conn)
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(built["fallback_sql"], built["fallback_params"])
+            results = [dict(row) for row in cur.fetchall()]
+            route = "fallback-old"
     cur.close()
+    if route_sink is not None:
+        route_sink["route"] = route
 
     for r in results:
         r["source"] = "pg_fts"
@@ -1052,6 +1564,7 @@ def pg_fts_search(
 def fts_fallback_search(
     conn,
     query: str,
+    include_failed: bool = False,
     top_k: int = 5,
     knowledge_type: Optional[str] = None,
     project: Optional[str] = None,
@@ -1068,5 +1581,5 @@ def fts_fallback_search(
     return pg_fts_search(
         conn, query, top_k=top_k,
         knowledge_type=knowledge_type, project=project, tag=tag, offset=offset,
-        core_only=core_only, pool=pool,
+        core_only=core_only, pool=pool, include_failed=include_failed,
     )

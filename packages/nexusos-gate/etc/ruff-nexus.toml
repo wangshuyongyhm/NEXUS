@@ -1,0 +1,24 @@
+# ruff-nexus.toml — NEXUS 审计 gate 规则集（Task816）
+# 来源：主控调研（ruff 官方规则 + GitHub 误报 issue #15473/#21889 + Augment checklist）
+# 定位：只查「异常处理完备性 + 日志可观测性」维度，不管风格（那是 formatter 的事）
+# 使用：ruff check --config <本文件> <files>（code gate C14 调用；降级原则：ruff 缺失→skip 不 FAIL）
+
+[lint]
+select = [
+  "E722",    # bare except（裸 except 抓一切连 KeyboardInterrupt 都吞）
+  "BLE",     # BLE001 blind except Exception/BaseException（盲捕）
+  "TRY400",  # except 块内 logging.error → 应 logging.exception（带 traceback）
+  "TRY401",  # verbose 异常插值（logging.error(f"...{e}") 冗余，exception 自带）
+  "G",       # logging 系列（G010 deprecated warn / G 系列 format 一致性）
+]
+
+# BLE001 已知误报场景（ruff issue #15473/#21889：异常已 log+raise 时误报）——
+# 不全局 ignore，业务代码里 log+raise 合法模式用行级 `# noqa: BLE001` 精确豁免
+# （豁免必须写清理由，防滥用）
+
+[lint.per-file-ignores]
+# 测试豁免：pytest.raises/with pytest.raises 模式不是吞错
+"**/tests_*.py" = ["BLE001", "TRY400", "E722", "TRY401"]
+"**/test_*.py" = ["BLE001", "TRY400", "E722", "TRY401"]
+"**/tests/**" = ["BLE001", "TRY400", "E722", "TRY401"]
+"**/conftest.py" = ["BLE001", "TRY400", "E722", "TRY401"]

@@ -1,7 +1,7 @@
 ---
 title: NEXUS Gate 体系 — 声明式门禁引擎
 description: 从信息路由到执行路由,场景门禁强制执行(替代靠自觉)
-updated: 2026-11-16
+updated: 2026-11-24
 ---
 
 # NEXUS Gate 体系
@@ -30,9 +30,9 @@ etc/gates/_checks/*.py  ← 检查插件(每个文件一个检查类型,启动�
 | dispatch | POST /dispatch 前 | dispatch.yaml | ✅ 在用 |
 | persist | 用户说"落盘"后 | persist.yaml | ✅ 在用 |
 | code | git commit 前 | code.yaml | ✅ 在用 |
-| deploy-sync | 部署后文档同步检查 | deploy-sync.yaml | ✅ 在用 |
-| loop_start | LOOP 全自动启动门禁 | loop_start.yaml | ✅ 在用 |
-| loop_complete | LOOP 退出前出口门禁 | loop_complete.yaml | ✅ 在用 |
+| deploy-sync | 部署后文档同步检查 | — | ❌ 已退役（2611230882，30 天零运行；定义与 _checks/deploy_synced.py 在 ~/.Trash/nexus-retire-gates-2611230882/） |
+| loop_start | LOOP 全自动启动门禁 | — | ❌ 已退役（2611230882；定义在 ~/.Trash/nexus-retire-gates-2611230882/） |
+| loop_complete | LOOP 退出前出口门禁 | — | ❌ 已退役（2611230882；同上） |
 | state_transition | LOOP 状态机转换合法性 | state_transition.yaml | ✅ 在用 |
 | user_decision | 发待决/画像代决前门禁 | user_decision.yaml | ✅ 在用 |
 
@@ -83,7 +83,7 @@ def check(params, context, agent):
 - 不导出 `check` 函数的 .py 被忽略(防误加载)
 - 加载失败的插件记 WARN 跳过(不崩 engine)
 
-## 内置检查插件(46 个)
+## 内置检查插件(51 个)
 
 | 插件 | 检查类型 | 用途 | 用于 |
 |------|---------|------|------|

@@ -25,6 +25,12 @@ def check(params: dict, context: dict, agent: str) -> tuple:
     返回: (passed, detail)
     """
     task_id = context.get("task_id", "")
+    # 2611230886：任务号别名（数字任务号/路径/frontmatter），三处读取端统一
+    try:
+        from nexusos_xdr.task_aliases import task_id_aliases as _tia
+        _aliases = _tia(task_id, context.get("task_path", ""))
+    except Exception:
+        _aliases = [task_id] if task_id else []
     if not task_id:
         return True, "无 task_id，跳过 outcome 回填检查"
 
@@ -39,15 +45,15 @@ def check(params: dict, context: dict, agent: str) -> tuple:
             cur.execute(
                 "SELECT id, target_id, outcome, created FROM agent_activity "
                 "WHERE action='apply_attempt' "
-                "AND (task_id=%s OR (agent_id=%s AND created >= CURRENT_DATE))",
-                (task_id, agent)
+                "AND (task_id = ANY(%s) OR (agent_id=%s AND created >= CURRENT_DATE))",
+                (_aliases, agent)
             )
             scope_note = f"（覆盖：task {task_id} + {agent} 当日全部）"
         else:
             cur.execute(
                 "SELECT id, target_id, outcome, created FROM agent_activity "
-                "WHERE action='apply_attempt' AND task_id=%s",
-                (task_id,)
+                "WHERE action='apply_attempt' AND task_id = ANY(%s)",
+                (_aliases,)
             )
 
         attempts = [

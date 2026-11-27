@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 
 from nexusos_mem.env_scrub import scrubbed_env  # Task600 池#50残留: 子进程 env 净化
+from nexusos_mem.redact_credential import redact_credentials  # Task 2611269956: 凭据号入库前脱敏
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # 离线，避免每次 encode 触发 HF Hub 网络探测（国内环境更稳）
@@ -55,11 +56,301 @@ DEFAULT_PORT = int(os.environ.get("NEXUS_EMBED_PORT", "11436"))
 _ENCODE_LOCK = threading.Lock()
 _STATE = {"ready": False, "encoded": 0, "started": time.time()}
 
+# Task 2611269952：补齐档位——每条只补到「不小于自己真实长度的最小档」。
+# 上一单只有一个 256 桶：12 个 token 的短查询被拉到 256 去算，延迟翻了四倍（本单实测 114 ms vs 30.5）。
+# 32→256 用倍档（短查询高频，档越细越省）；256 以上每档约 1.25 倍，最坏浪费 ≤25%，
+# 保证多行长文本不因补齐被拖过 30% 的验收线。档位的个数就是形状的个数。
+_DEFAULT_PAD_TIERS = (32, 64, 128, 256, 320, 384, 480, 640, 768, 960,
+                      1280, 1536, 1920, 2560, 3072, 3840, 5120, 6144, 7680, 8192)
+
+
+def _pad_tiers_from_env() -> tuple:
+    """`NEXUS_EMBED_PAD_TIERS=32,64,128,…` 可整串覆盖缺省档位（排序去重后使用）。"""
+    raw = os.environ.get("NEXUS_EMBED_PAD_TIERS", "").replace(" ", "")
+    vals = sorted({int(x) for x in raw.split(",") if x.isdigit()})
+    return tuple(vals) if vals else _DEFAULT_PAD_TIERS
+
+
+_PAD_TIERS = _pad_tiers_from_env()
+_BATCH_TIERS = (1, 2, 4, 8, 16)   # 固定批次档：不足一档的按档向上取（单条查询不陪跑 16 行）
+_LAST_SHAPES = {"shapes": ()}     # 上次编码用到的形状 (行数, 档位)，供清缓存策略判断
+_CACHE_LAST = {"shape": None, "since": 0}
+# 清缓存策略：每次清 12–25 ms（本单同一份模型量到 12.8 ms）；形状不变时缓存池能直接复用。
+_EMPTY_CACHE_MODE = os.environ.get("NEXUS_EMBED_EMPTY_CACHE", "auto")  # auto|always|never
+_EMPTY_CACHE_EVERY = max(1, int(os.environ.get("NEXUS_EMBED_EMPTY_CACHE_EVERY", "32")))
+_SLICE_MAX = 256                  # Task582 原有的分片上限，保持原值
+_MODEL_MAX_TOKENS = 8192          # bge-m3 的 max_seq_length（与 search.py 加载口径一致）
+_INFLIGHT = {"n": 0}              # 在途编码请求数：自愈重启只在 0 时动手
+_FLUSHING = {"n": 0}              # 正在刷 pending 文件的线程数（刷文件也会丢），见 _busy_count
+_CACHE_STATS = {"calls": 0, "sec": 0.0, "skipped": 0}  # empty_cache 的调用/跳过次数与累计耗时
+_SELFHEAL_LAST = {"mb": None, "source": None, "ts": None}
+_SELFHEAL = {
+    "enabled": os.environ.get("NEXUS_EMBED_SELFHEAL", "1") == "1",
+    "threshold_mb": float(os.environ.get("NEXUS_EMBED_SELFHEAL_MB", "6000")),
+    "interval": float(os.environ.get("NEXUS_EMBED_SELFHEAL_INTERVAL", "60")),
+    # Task 2611269955：一次读数可能是「量错了」（vmmap 超时/退路单位错），要连续两轮都越线才动手
+    "confirm_rounds": max(1, int(os.environ.get("NEXUS_EMBED_SELFHEAL_CONFIRM", "2"))),
+}
+_SELFHEAL_STREAK = {"n": 0}                    # 连续「即时足迹」越线的轮数
+_VMMAP_TIMEOUT_SEC = float(os.environ.get("NEXUS_EMBED_VMMAP_TIMEOUT", "20"))
+
 
 def _model():
     """复用 search.py 的模型单例，保证向量口径与入库时完全一致。"""
     from nexusos_mem.search import _get_bge_m3
     return _get_bge_m3()
+
+
+def _pad_bucket(token_len: int) -> int:
+    """取不小于真实长度的最小档（不截断，封顶模型最大长度）。"""
+    if token_len <= 0:
+        return _PAD_TIERS[0]
+    for tier in _PAD_TIERS:
+        if token_len <= tier:
+            return tier
+    return _MODEL_MAX_TOKENS
+
+
+def _token_len(model, text: str) -> int:
+    """这条文本分词后的长度（含特殊符号），用来决定补齐档位。"""
+    try:
+        return len(model.tokenizer(text, add_special_tokens=True)["input_ids"])
+    except Exception as e:
+        # 量不出长度就按模型上限补齐：形状多一个，但绝不截断内容
+        print(f"[embed_server] 分词长度失败，按上限补齐: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return _MODEL_MAX_TOKENS
+
+
+def _batch_tier(n: int) -> int:
+    """向上取到固定批次档（超过最大档就按最大档跑）。"""
+    for tier in _BATCH_TIERS:
+        if n <= tier:
+            return tier
+    return _BATCH_TIERS[-1]
+
+
+def _encode_fixed_shape(rows: list) -> list:
+    """按档分组 + 固定批次档编码：每条只补到不小于自己长度的最小档。
+
+    短的不陪长的算：同一批先按各自档位分组，每组单独跑一次 encode（一次一个形状），
+    再按原顺序拼回。形状集合 = 「批次档 × 补齐档」，档位的个数决定形状个数。
+    补齐位被注意力掩码盖住，向量逐维不变（50 块余弦把守）。
+    """
+    model = _model()
+    groups = {}
+    for idx, row in enumerate(rows):
+        groups.setdefault(_pad_bucket(_token_len(model, row)), []).append(idx)
+    out = [None] * len(rows)
+    shapes = []
+    top = _BATCH_TIERS[-1]
+    for tier in sorted(groups):
+        idxs = groups[tier]
+        for start in range(0, len(idxs), top):
+            part = idxs[start:start + top]
+            real = len(part)
+            batch = [rows[i] for i in part]
+            if real < top:
+                batch = batch + [""] * (_batch_tier(real) - real)  # 占位行，算完即丢
+            shapes.append((len(batch), tier))
+            vecs = model.encode(
+                batch,
+                batch_size=len(batch),
+                normalize_embeddings=True,
+                processing_kwargs={"text": {"padding": "max_length",
+                                            "max_length": tier,
+                                            "truncation": True}},
+            )
+            for pos, i in enumerate(part):
+                out[i] = vecs[pos].tolist()
+    _LAST_SHAPES["shapes"] = tuple(shapes)
+    return out
+
+
+def _cache_should_clear(shape, last_shape, since, mode=None, every=None) -> bool:
+    """纯判定：这次要不要清缓存。auto＝形状变了或攒满 every 次才清。"""
+    mode = _EMPTY_CACHE_MODE if mode is None else mode
+    every = _EMPTY_CACHE_EVERY if every is None else every
+    mode = {"1": "always", "0": "never"}.get(mode, mode)   # 兼容上一单的 1/0 开关
+    if mode == "never":
+        return False
+    if mode == "always":
+        return True
+    return shape != last_shape or since >= every
+
+
+def _empty_cache_after_encode(shape=None) -> None:
+    """按需清 MPS 缓存池（Task 2611269951 加的，2611269952 改成有条件）。
+
+    每次清 12–25 ms；形状不变时缓存池可以直接复用，所以缺省只在「出现新形状」
+    或「攒满 _EMPTY_CACHE_EVERY 次」时清。量不出好处时回到 always 一档即可。
+    """
+    if not _cache_should_clear(shape, _CACHE_LAST["shape"], _CACHE_LAST["since"]):
+        _CACHE_STATS["skipped"] += 1
+        _CACHE_LAST["since"] += 1
+        return
+    try:
+        import torch
+        if not torch.backends.mps.is_available():
+            return
+        t0 = time.perf_counter()
+        torch.mps.empty_cache()
+        _CACHE_STATS["sec"] += time.perf_counter() - t0
+        _CACHE_STATS["calls"] += 1
+    except Exception as e:
+        # 清缓存失败不影响向量正确性，但必须留痕，不许静默
+        print(f"[embed_server] empty_cache 失败: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+    _CACHE_LAST["shape"] = shape
+    _CACHE_LAST["since"] = 0
+
+
+def _parse_vmmap_size(token: str):
+    """vmmap 的尺寸串（'3.2G' / '848.0M' / '108K' / 字节数）→ MB。"""
+    token = (token or "").strip().rstrip(",")
+    if not token:
+        return None
+    unit = token[-1].upper()
+    try:
+        value = float(token[:-1]) if unit in ("K", "M", "G") else float(token)
+    except ValueError:
+        return None
+    return value * {"K": 1 / 1024, "M": 1.0, "G": 1024.0}.get(unit, 1 / (1024 * 1024))
+
+
+def _ru_maxrss_to_mb(raw, platform_name=None) -> float:
+    """`ru_maxrss` 换 MB：**macOS 的单位是字节，Linux 才是 KB**（Task 2611269955 的线上事故根因）。
+
+    平台认不出来时按字节换（结果偏小）——这一路只写日志，偏小只会少记一条，不会误判越线把服务杀掉。
+    """
+    name = (platform_name or sys.platform or "").lower()
+    if name.startswith("darwin"):
+        return raw / (1024.0 * 1024.0)
+    if name.startswith("linux"):
+        return raw / 1024.0
+    print(f"[embed_server] 认不出的平台 {name!r}，ru_maxrss 按字节换（偏小一侧）",
+          file=sys.stderr, flush=True)
+    return raw / (1024.0 * 1024.0)
+
+
+def _peak_rss_mb():
+    """峰值 RSS（MB）+ 原始值。只用于日志：它单调不减，不能当「现在越线」的依据。"""
+    import resource
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(_ru_maxrss_to_mb(raw), 1), raw
+
+
+def _footprint_mb():
+    """当前物理足迹（MB）+ 来源。量不到就返回 (None, 原因)，**不拿峰值当替代读数**。
+
+    返回的来源只有 "vmmap" 是「即时读数」；"timeout" / "error" / "unavailable" 都表示这一轮不作判断。
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["vmmap", "--summary", str(os.getpid())],
+            capture_output=True, text=True, timeout=_VMMAP_TIMEOUT_SEC,
+        )
+        for line in out.stdout.splitlines():
+            if line.strip().startswith("Physical footprint:"):
+                mb = _parse_vmmap_size(line.split()[2])
+                if mb is not None:
+                    return mb, "vmmap"
+        print("[embed_server] vmmap 输出里没有 Physical footprint 行，这一轮不作判断",
+              file=sys.stderr, flush=True)
+        return None, "unavailable"
+    except subprocess.TimeoutExpired:
+        print(f"[self-heal] vmmap 超时（>{_VMMAP_TIMEOUT_SEC:.0f}s），跳过这一轮",
+              file=sys.stderr, flush=True)
+        return None, "timeout"
+    except Exception as e:
+        print(f"[embed_server] vmmap 量足迹失败: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return None, "error"
+
+
+def _selfheal_decision(footprint_mb, threshold_mb, inflight) -> str:
+    """纯判定：busy（有在途活，不动）/ ok（没越线）/ restart（越线且空闲）。"""
+    if inflight > 0:
+        return "busy"
+    if footprint_mb is not None and footprint_mb >= threshold_mb:
+        return "restart"
+    return "ok"
+
+
+def _busy_count() -> int:
+    """在途活计数：HTTP 编码 + 正在刷 pending 文件（两者都会丢工作）。"""
+    return _INFLIGHT["n"] + _FLUSHING["n"]
+
+
+def _selfheal_restart(reason_mb) -> None:
+    """越线后：刷完待处理文件、留日志、退出（KeepAlive 会把进程拉起来）。"""
+    with _pending_lock:
+        pending_n = len(_pending_files)
+    print(f"[self-heal] 触发：足迹 {reason_mb:.0f}MB ≥ 阈值 {_SELFHEAL['threshold_mb']:.0f}MB，"
+          f"当前无在途请求；先刷 pending {pending_n} 个文件", flush=True)
+    try:
+        _flush_pending()
+    except Exception as e:
+        # 刷不动也要退出（越线进程留着只会更糟），但把失败写进日志
+        print(f"[self-heal] flush pending 失败: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+    print(f"[self-heal] 退出进程 pid={os.getpid()}（KeepAlive 会重启）", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
+# 这些来源都表示「这一轮没有可用的即时读数」；其余来源（vmmap / 测试注入）都按即时读数处理
+_UNUSABLE_SOURCES = ("timeout", "error", "unavailable", "ru_maxrss")
+
+
+def _selfheal_tick(threshold_mb=None, footprint_fn=None, ready=None) -> str:
+    """跑一次自愈检查；返回 not_ready / unknown / busy / ok / pending_confirm / restart。
+
+    三条硬规矩（Task 2611269955 事故后加的）：
+      ① 服务没就绪不检查（模型预热期的读数没有意义）；
+      ② 只有「即时足迹」（vmmap）能作为退出依据，量不到这一轮就跳过，退路读数只写日志；
+      ③ 连续 `confirm_rounds` 轮越线才退出——单轮越线可能只是量错了。
+    """
+    threshold = _SELFHEAL["threshold_mb"] if threshold_mb is None else threshold_mb
+    need_rounds = max(1, int(_SELFHEAL.get("confirm_rounds", 2)))
+    if ready is False:                      # None = 调用方没给门（测试/旧调用），按已就绪处理
+        return "not_ready"
+    mb, source = (footprint_fn or _footprint_mb)()
+    if mb is None or source in _UNUSABLE_SOURCES:
+        peak_mb, raw = _peak_rss_mb()
+        print(f"[self-heal] 这一轮量不到即时足迹（来源={source}），跳过这一轮；"
+              f"峰值 RSS {peak_mb} MB（原始值 {raw}，只记日志、不作为退出依据）",
+              file=sys.stderr, flush=True)
+        _SELFHEAL_LAST.update({"mb": None, "source": source, "ts": time.time()})
+        return "unknown"
+    _SELFHEAL_LAST.update({"mb": mb, "source": source, "ts": time.time()})
+    if _busy_count() > 0:
+        return "busy"
+    if mb < threshold:
+        _SELFHEAL_STREAK["n"] = 0            # 有反证就把连续计数清掉
+        return "ok"
+    _SELFHEAL_STREAK["n"] += 1
+    if _SELFHEAL_STREAK["n"] < need_rounds:
+        print(f"[self-heal] 即时足迹 {mb:.0f}MB ≥ 阈值 {threshold:.0f}MB，"
+              f"连续第 {_SELFHEAL_STREAK['n']}/{need_rounds} 轮，等下一轮确认",
+              file=sys.stderr, flush=True)
+        return "pending_confirm"
+    decision = _selfheal_decision(mb, threshold, _busy_count())
+    if decision == "restart":
+        _selfheal_restart(mb)
+    return decision
+
+
+def _selfheal_loop() -> None:
+    """后台自愈线程：定时看足迹，越线且空闲就退出进程。"""
+    while True:
+        time.sleep(_SELFHEAL["interval"])  # c2-allow: 后台守护线程的定时循环，每 interval 秒醒一次看足迹；不在任何请求处理路径上，也不持锁
+        try:
+            _selfheal_tick(ready=_STATE["ready"])
+        except Exception as e:
+            print(f"[self-heal] 检查异常: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
 def _encode(texts):
@@ -75,16 +366,24 @@ def _encode(texts):
     from nexusos_mem.search import EMBED_MAX_CHARS
     clipped = [(t or "")[:EMBED_MAX_CHARS] for t in texts]
     # Task582: 分片上限（对齐 embed_corpus 批量惯例 64×4；单请求超万条不再整载内存）
-    slice_max = 256
+    slice_max = _SLICE_MAX
     out = []
-    for i in range(0, len(clipped), slice_max):
-        chunk = clipped[i:i + slice_max]
-        vecs = _model().encode(
-            chunk, normalize_embeddings=True,
-            batch_size=min(32, max(1, len(chunk))),
-        )
-        out.extend(v.tolist() for v in vecs)
-    _STATE["encoded"] += len(clipped)
+    _INFLIGHT["n"] += 1
+    try:
+        for i in range(0, len(clipped), slice_max):
+            chunk = clipped[i:i + slice_max]
+            # 原实现（Task 2611269951 起改走固定形状）：批大小=条数、按批内最长补齐，
+            # 几乎每次请求一个新形状。
+            # vecs = _model().encode(
+            #     chunk, normalize_embeddings=True,
+            #     batch_size=min(32, max(1, len(chunk))),
+            # )
+            # out.extend(v.tolist() for v in vecs)
+            out.extend(_encode_fixed_shape(chunk))
+        _STATE["encoded"] += len(clipped)
+    finally:
+        _INFLIGHT["n"] -= 1
+        _empty_cache_after_encode(_LAST_SHAPES["shapes"])
     return out
 
 
@@ -113,6 +412,17 @@ class _Handler(BaseHTTPRequestHandler):
                 "dim": BGE_M3_DIM,
                 "encoded": _STATE["encoded"],
                 "uptime_sec": round(time.time() - _STATE["started"], 1),
+                # Task 2611269951: 清缓存开销与自愈状态的观测口
+                "inflight": _INFLIGHT["n"],
+                "empty_cache": {"calls": _CACHE_STATS["calls"],
+                                "skipped": _CACHE_STATS["skipped"],
+                                "sec": round(_CACHE_STATS["sec"], 3),
+                                "mode": _EMPTY_CACHE_MODE},
+                "self_heal": {"enabled": _SELFHEAL["enabled"],
+                              "threshold_mb": _SELFHEAL["threshold_mb"],
+                              "last_mb": _SELFHEAL_LAST["mb"],
+                              "last_source": _SELFHEAL_LAST["source"],
+                              "last_ts": _SELFHEAL_LAST["ts"]},
             })
         elif self.path.startswith("/reconcile"):
             # Task 333 Layer 1d: 手动触发对账（扫近N小时.md，对比hash，re-embed stale）
@@ -426,6 +736,8 @@ def _embed_single_file(abs_path: str) -> dict:
         if not chunks:
             return {"ok": True, "chunks": 0, "skipped": True}
         chunks = chunks[:CHUNK_MAX_PER_DOC]
+        # Task 2611269956：切片入库前把凭据号换成占位（hash 与向量都基于脱敏后的文本）
+        chunks = [redact_credentials(c)[0] for c in chunks]
 
         # 连 PG
         import psycopg2
@@ -627,7 +939,7 @@ def _fsevents_worker():
     如果 fswatch 不可用，降级为 10 秒 content_hash 轮询。
     """
     import shutil
-    import subprocess
+    # import subprocess  # Task 2611269952: 未使用（ruff F401），注释保留
     from pathlib import Path
 
     vault = Path(_VAULT_ROOT)
@@ -726,8 +1038,8 @@ def _fsevents_native(vault):
     FSEvents 自带 latency 聚合（Task 333: 设为 1.0 秒），加上去抖 0.8 秒，
     总延迟约 2 秒（远好于 4 小时轮询）。
     """
-    import ctypes
-    from pathlib import Path
+    # import ctypes  # Task 2611269952: 未使用（ruff F401），注释保留
+    # from pathlib import Path  # Task 2611269952: 未使用（ruff F401），注释保留
 
     try:
         from FSEvents import (
@@ -754,7 +1066,7 @@ def _fsevents_native(vault):
 
     # FSEvents 回调（C 函数指针形式）
     # 回调签名: (stream, ctx_ref, num_events, event_paths_ref, event_flags_ref, event_ids_ref)
-    import FSEvents as _fsevents_mod
+    # import FSEvents as _fsevents_mod  # Task 2611269952: 未使用（ruff F401），注释保留
 
     # 定义 Python 回调
     def _fsevents_callback(stream, info, num_events, event_paths, event_flags, event_ids):
@@ -851,7 +1163,7 @@ def _polling_fallback(vault):
     """降级轮询模式（30秒扫一次 content_hash）。"""
     import time
     import hashlib
-    from pathlib import Path
+    # from pathlib import Path  # Task 2611269952: 未使用（ruff F401），注释保留
 
     SCAN_INTERVAL = 10  # 秒（降级模式，比原生 FSEvents 慢但远好于 4 小时 cron）
     hash_cache: dict = {}  # {rel_path: sha1}
@@ -884,7 +1196,7 @@ def _polling_fallback(vault):
         except Exception as e:
             print(f"[fsevents-poll] 扫描失败: {e}", file=sys.stderr, flush=True)
 
-        time.sleep(SCAN_INTERVAL)
+        time.sleep(SCAN_INTERVAL)  # c2-allow: 降级轮询循环的定时等待（fswatch 不可用时的兜底扫描），不在请求处理路径上；本行早于门禁，本次只补注解
 
 
 def _flush_pending():
@@ -896,13 +1208,17 @@ def _flush_pending():
     if not files:
         return
 
-    print(f"[fsevents] 去抖完成，embed {len(files)} 个文件", flush=True)
-    for f in files:
-        result = _embed_single_file(f)
-        if result.get("ok") and not result.get("skipped"):
-            print(f"[fsevents] ✅ {f}: {result.get('chunks', 0)} chunks", flush=True)
-        elif not result.get("ok"):
-            print(f"[fsevents] ❌ {f}: {result.get('error')}", file=sys.stderr, flush=True)
+    _FLUSHING["n"] += 1          # 自愈重启据此让路：刷文件刷到一半退出会丢这一批
+    try:
+        print(f"[fsevents] 去抖完成，embed {len(files)} 个文件", flush=True)
+        for f in files:
+            result = _embed_single_file(f)
+            if result.get("ok") and not result.get("skipped"):
+                print(f"[fsevents] ✅ {f}: {result.get('chunks', 0)} chunks", flush=True)
+            elif not result.get("ok"):
+                print(f"[fsevents] ❌ {f}: {result.get('error')}", file=sys.stderr, flush=True)
+    finally:
+        _FLUSHING["n"] -= 1
 
 
 
@@ -998,6 +1314,13 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
     _STATE["ready"] = True
     print(f"[embed_server] 就绪，加载耗时 {time.time() - t0:.1f}s，"
           f"监听 http://{host}:{port}", flush=True)
+
+    # Task 2611269951: 自愈兜底——足迹越线且当下空闲就刷 pending、留日志、退出。
+    # 不改启动配置（plist 是被监视的），进程内自己退出，KeepAlive 负责拉起。
+    if _SELFHEAL["enabled"]:
+        threading.Thread(target=_selfheal_loop, daemon=True, name="self-heal").start()
+        print(f"[self-heal] 已启用：阈值 {_SELFHEAL['threshold_mb']:.0f}MB，"
+              f"每 {_SELFHEAL['interval']:.0f}s 检查一次", flush=True)
 
     # HTTPServer 放子线程（daemon）
     httpd = ThreadingHTTPServer((host, port), _Handler)

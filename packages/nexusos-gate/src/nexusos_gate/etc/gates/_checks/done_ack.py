@@ -4,7 +4,9 @@
 总结全文躺 task_state 无强制消费动作。机制化：
   dispatch gate D9（REJECT）：窗口内存在 DONE 且未 ack 的任务 → 拦派单；
   persist gate P17（WARN）：同一查询 → 落盘时提醒补 ack。
-ack 动作：POST /task/{id}/ack {"agent":..., "key_points":["复述要点",...]}。
+ack 动作：POST /task/{id}/ack，签收人 = 派单方本人（2611239003 起要出示派单方的检索凭据）。
+入口命令：`bash 05-System/自动化脚本/nexus-ack.sh <task_id> '["复述要点"]'`
+（2611239908：凭据由命令内部读、不回显；手工拼 curl 漏请求头在强制模式下会被 403）。
 
 数据源：优先进程内 import nexusos_xdr.task_state（gate 引擎随 xdr 进程跑，
 零网络）；import 失败（引擎在非 xdr 进程）→ fail-open 放行留痕（同 D7 先例）。
@@ -72,6 +74,6 @@ def check(params: dict, context: dict, agent: str) -> tuple:
     scope = f"本派单方 {dispatcher!r} 名下" if dispatcher else "窗口内"
     return False, (
         f"{len(mine)} 个{scope} DONE 任务总结未消费（{via}，窗口 {window:g}h）：{tasks}{more}{others_note}。"
-        "先读总结复述要点再 ack：curl -X POST http://127.0.0.1:19998/task/<task_id>/ack "
-        "-d '{\"agent\":\"<你的名>\",\"key_points\":[\"复述要点\"]}'"
+        "先读总结复述要点再签收：bash 05-System/自动化脚本/nexus-ack.sh <task_id> "
+        "'[\"复述要点\"]'（凭据由命令内部读、不回显；手工拼 curl 漏请求头在强制模式下会被 403）"
     )

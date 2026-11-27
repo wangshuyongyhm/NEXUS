@@ -128,13 +128,20 @@ items:
             except Exception as e:
                 print('[D7] fetch 失败(放行): %s %s' % (url, e))
                 return None
-        dom_pat = re.compile(r'(?:05-System|01-Projects|02-Areas|03-Daily|04-Templates|06-Memory|task)/[0-9A-Za-z_\-\\u4e00-\\u9fff]+(?:/[0-9A-Za-z_\-\\u4e00-\\u9fff]+)?')
-        def domains(text):
+        # 2611230882 收窄（用户裁定 U12）：旧判法按「目录前缀相同」报，近半派单都响。
+        # 改为只认任务书/参考件里点名的**具体文件**（带扩展名、至少两级）与在途任务点名的
+        # 具体文件同路径才算冲突；两边只给目录、给不出文件名单的不算；判不出就不报。
+        # 旧 dom_pat/domains 保留在注释里可逆。
+        # 注意：旧 dom_pat 用 \\u4e00-\\u9fff 写中文范围——YAML 块标量里双反斜杠原样落、正则引擎
+        # 再解一次得到字面量 'u4e00' 不是范围，中文路径（自动化脚本 等）一直匹配不到（2611230882 实证）。
+        # 现用 [^\s/]+ 直接表示「路径段字符」，不依赖转义，中英文路径都能抽。
+        # dom_pat = re.compile(r'(?:05-System|01-Projects|02-Areas|03-Daily|04-Templates|06-Memory|task)/[0-9A-Za-z_\-\\u4e00-\\u9fff]+(?:/[0-9A-Za-z_\-\\u4e00-\\u9fff]+)?')
+        file_pat = re.compile(r'(?:05-System|01-Projects|02-Areas|03-Daily|04-Templates|06-Memory|task)/(?:[^\s/`\'"()]+/)+[^\s/`\'"()]+\.(?:py|sh|md|yaml|yml|json|toml|plist|txt|js|ts|ets)')
+        def files(text):
             out = []
-            for m in dom_pat.findall(text or ''):
-                d = '/'.join(m.split('/')[:2])
-                if d not in out:
-                    out.append(d)
+            for m in file_pat.findall(text or ''):
+                if m not in out:
+                    out.append(m)
             return out
         my_md = ''
         try:
@@ -142,7 +149,12 @@ items:
                 my_md = f.read()
         except OSError:
             pass
-        my_dom = domains(my_md)
+        try:
+            with open(task_dir + '/input/references.md', encoding='utf-8', errors='replace') as f:
+                my_md += '\n' + f.read()
+        except OSError:
+            pass
+        my_dom = files(my_md)
         conflicts = []
         ts = fetch(xdr + '/task_state')
         if ts:
@@ -152,12 +164,12 @@ items:
                     continue
                 try:
                     with open(tp, encoding='utf-8', errors='replace') as f:
-                        their_dom = domains(f.read())
+                        their_dom = files(f.read())
                 except OSError:
                     continue
                 overlap = [d for d in their_dom if d in my_dom]
                 if overlap:
-                    conflicts.append('active 任务 %s(%s, 目标域重叠: %s)' % (t.get('task_id', '?'), t.get('callee', '?'), ','.join(overlap[:4])))
+                    conflicts.append('active 任务 %s(%s, 同文件: %s)' % (t.get('task_id', '?'), t.get('callee', '?'), ','.join(overlap[:4])))
         ol = fetch(xdr + '/session/op-log?within=120')
         if ol:
             for op in ol.get('ops') or []:
@@ -165,15 +177,14 @@ items:
                     continue
                 tgt = op.get('target') or ''
                 for d in my_dom:
-                    if d and d in tgt:
+                    if d and d == tgt:
                         conflicts.append('op-log 120s: %s %s %s' % (op.get('agent', '?'), op.get('op', '?'), tgt[:80]))
                         break
         if conflicts:
-            print('[D7] 并行冲突嫌疑 %d 条(派发前请消费/错峰, WARN 不拦):' % len(conflicts), file=sys.stderr)
-            for c in conflicts:
-                print('  - ' + c, file=sys.stderr)
+            # 2611230882：降为一行提示——仅真同文件时出现，不展开明细
+            print('[D7] 提示：可能与在途任务改到同一个文件（%s）' % '; '.join(conflicts[:3]), file=sys.stderr)
             sys.exit(1)
-        print('[D7] 无并行冲突(task_state active + op-log 120s)')
+        print('[D7] 无同文件冲突(task_state active + op-log 120s)')
         PYEOF
       expect_rc: 0
       timeout: 10

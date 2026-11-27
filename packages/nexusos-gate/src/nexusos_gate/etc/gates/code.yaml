@@ -68,6 +68,14 @@ items:
   # Task519: 原版 find 全 Vault 发现有测试就 `pytest -q`(无路径)扫全库 → 120s 超时误拦。
   # 改为 staged 无测试文件 → skip；有 → 只跑那些文件(有边界不超时)。
   # 保留 rc=5(no tests collected)视为 pass 的旧行为；无 staged 测试时依赖 C8 验证证据兜底。
+  # Task2611231130: 同名测试文件（部署位与包内各一份、内容不同）不能放进同一次 pytest——
+  # pytest 默认把测试目录插进搜索路径，同名模块必报 import file mismatch（主控 22:50 提交被拦）。
+  # 现在交给 nexusos_gate/scripts/staged_tests_grouped.py：按 basename 分组、每组各跑一次、取最差；
+  # 2611231129 追件：助手不能放 _checks/（那里是插件扫描目录，无 check 函数会被当插件报警到 stderr，
+  # 污染门禁输出）——已挪到 nexusos_gate/scripts/，这里按「env > 包位置 > 项目相对」三级解析。
+  # 文件名无重复时仍是一组，行为与改前一致。原命令保留在下方 YAML 注释（折叠标量里不能写
+  # shell 注释——`>` 会把换行折成空格，行内 `#` 会把后面整条命令吞成注释）：
+  #   原：python3 -m pytest -q $py_changed 2>&1 | tail -5; rc=${PIPESTATUS[0]}; [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] && …
   - id: C5
     name: 测试通过
     auto: true
@@ -78,9 +86,10 @@ items:
         cd "${PROJECT_ROOT:-.}";
         py_changed=$(git -c core.quotepath=off diff --cached --name-only --diff-filter=d 2>/dev/null | grep -E '(^|/)(test_.*\.py$|.*_test\.py$|conftest\.py$)' | grep -v '/output/files/' | grep -v 'conftest\.py$' || true);
         if [ -z "$py_changed" ]; then echo "no test in staged changes, skip pytest (relies on C8 evidence)"; exit 0; fi;
-        python3 -m pytest -q $py_changed 2>&1 | tail -5;
-        rc=${PIPESTATUS[0]};
-        [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] && echo "OK(rc=$rc)" || { echo "FAIL(rc=$rc)"; exit 1; }
+        _scripts="${NEXUS_GATE_SCRIPTS_DIR:-}";
+        if [ -z "$_scripts" ]; then _scripts=$(python3 -c "import nexusos_gate,pathlib;print(pathlib.Path(nexusos_gate.__file__).parent/'scripts')" 2>/dev/null || true); fi;
+        if [ -z "$_scripts" ] || [ ! -f "$_scripts/staged_tests_grouped.py" ]; then _scripts="${PROJECT_ROOT:-.}/05-System/自动化脚本/pypi/nexusos-gate/src/nexusos_gate/scripts"; fi;
+        printf '%s\n' "$py_changed" | python3 "$_scripts/staged_tests_grouped.py"
       expect_rc: 0
       timeout: 120
 

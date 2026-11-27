@@ -57,6 +57,32 @@ def _has_next_steps(block: str) -> bool:
     return False
 
 
+def _fenced_blocks_with_end(text: str) -> list:
+    """带结束位置的行级围栏遍历（B7，池#826）。
+
+    语义与 _vaultlink.split_fences 同源（同 _FENCE_LINE_RE、未闭合剥到文末），
+    额外产出每块结束字符 offset（闭栏行/文末之后的 pos）——供「机读块在尾部
+    窗口内」判定：先全文配对后验位，替代旧法先截尾（窗口起点切进围栏体时
+    开栏丢失、后续配对全移位——B5 report 4180 字符三轮 G12 误报实测）。
+    注意：split_fences 若改围栏语义，本函数须同步（同一正则同一行循环）。
+    """
+    out, buf, info, pos = [], None, "", 0
+    for line in text.split("\n"):
+        pos += len(line) + 1
+        m = _vaultlink._FENCE_LINE_RE.match(line)
+        if m:
+            if buf is None:
+                info, buf = m.group(2).strip(), []
+            else:
+                out.append((info, "\n".join(buf), pos))
+                buf, info = None, ""
+        elif buf is not None:
+            buf.append(line)
+    if buf is not None:
+        out.append((info, "\n".join(buf), pos))
+    return out
+
+
 def check(params: dict, context: dict, agent: str) -> tuple:
     """
     params:
@@ -77,25 +103,31 @@ def check(params: dict, context: dict, agent: str) -> tuple:
     except OSError as e:
         return False, f"读取失败: {path} ({e})"
 
-    # 只看尾部（最后 3000 字符足够容纳状态块，防正文误命中）
-    _, blocks = _vaultlink.split_fences(text[-3000:])
-    yaml_blocks = [b[1] for b in blocks if b[0] == "yaml"]
+    # 只看尾部（最后 3000 字符足够容纳状态块，防正文误命中）——B7：先全文
+    # 配对后验窗口（旧法 text[-3000:] 截尾先行，窗口切进围栏体即配对错乱）。
+    blocks = _fenced_blocks_with_end(text)
+    yaml_blocks = [(c, end) for i, c, end in blocks if i == "yaml"]
     if not yaml_blocks:
         return False, ("report.md 尾部缺机读状态块——无 ```yaml 围栏"
                        "（Task597 #48：尾部加 ```yaml 围栏含 status/evidence/"
                        "next_steps，模板见 task-spec §2 第 6 项；非 yaml 围栏"
                        "（如裸 ```）不算机读块）")
-    candidates = [b for b in yaml_blocks if _STATUS_RE.search(b)]
+    candidates = [x for x in yaml_blocks if _STATUS_RE.search(x[0])]
     if not candidates:
         return False, ("机读块缺 status 字段——```yaml 围栏存在但不含 "
                        "status 行（模板见 task-spec §2 第 6 项）")
 
     # 多候选（正文示例 yaml + 尾部真块）时优先 status 可识别的最后一个
-    def _st(b):
-        return _norm(_STATUS_RE.search(b).group(1))
+    def _st(item):
+        return _norm(_STATUS_RE.search(item[0]).group(1))
 
-    recognized = [b for b in candidates if _st(b) in _UNFINISHED | {"complete"}]
-    block = (recognized or candidates)[-1]
+    recognized = [x for x in candidates if _st(x) in _UNFINISHED | {"complete"}]
+    block, block_end = (recognized or candidates)[-1]
+    # 窗口判定（陷阱3：块结束 offset ≥ len-3000 为内，边界值算内）
+    if block_end < len(text) - 3000:
+        return False, (f"机读块不在尾部窗口（块结束 offset {block_end}，"
+                       f"窗口起点 {len(text) - 3000}）——机读块必须在 report "
+                       "尾部（防正文中部示例块误命中）")
     raw = _STATUS_RE.search(block).group(1).strip()
     status = _norm(raw)
     if status not in _UNFINISHED | {"complete"}:

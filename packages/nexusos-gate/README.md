@@ -1,3 +1,9 @@
+---
+title: NEXUS Gate 引擎
+description: 声明式门禁：场景YAML+checks插件池
+updated: 2026-11-19
+---
+
 # nexusos-gate
 
 **NEXUS Gate — 声明式门禁引擎（场景 YAML + checks 插件池）**
@@ -6,10 +12,10 @@
 
 ## 核心特性
 
-- **声明式场景定义**：每个门禁场景一个 YAML（示例见 examples/gates/），含 required_context 校验 + 检查项列表
+- **声明式场景定义**：每个门禁场景一个 YAML（示例见随包的 etc/checks/examples/），含 required_context 校验 + 检查项列表
 - **插件池自动发现**：`etc/gates/_checks/` 下 46 个检查插件按文件名自动装载，覆盖对抗式审查、README 同步、MEM 查询留痕、验证证据等维度
 - **分级语义**：REJECT（产出缺失，硬拦截）/ WARN（附属质量，记录后放行）
-- **CLI + Python API 双入口**：脚本可 `python3 -m nexusos_gate.gate_engine <scenario> <json>`，代码可 `from nexusos_gate import gate_check`
+- **CLI + Python API 双入口**：脚本可 `python3 -m nexusos_gate.gate_engine <scenario> <json> [--agent <name>]`（CLI 落流身份，见下），代码可 `from nexusos_gate import gate_check`
 - **Fail-open 告警写 PG**：psycopg2 为可选依赖，缺失时门禁仍可用，仅失去告警落库能力
 
 ## 安装
@@ -48,22 +54,29 @@ python -c "import nexusos_gate; print('ok')"
 CLI 方式（shell / pre-commit hook 适用）：
 
 ```bash
-NEXUS_GATES_DIR=./examples/gates python3 -m nexusos_gate.gate_engine minimal '{"report_path":"output/report.md"}'
+NEXUS_GATES_DIR=$(python3 -c 'import nexusos_gate,os;print(os.path.join(os.path.dirname(nexusos_gate.__file__),"etc/checks/examples"))') \
+  python3 -m nexusos_gate.gate_engine doc_consistency '{}' --agent your-agent
+
+# 身份落流：CLI 直跑时用 --agent / NEXUS_AGENT 指明真实 Agent 名（2611172047 B6）
+# 优先级：显式 NEXUS_AGENT > --agent <name> > 兜底 "cli"（cli 未注册→事件不落流但判定不变）
+NEXUS_AGENT=zcode python3 -m nexusos_gate.gate_engine state_transition '{"from_state":"S4","to_state":"S5","session_id":"s1"}'
+python3 -m nexusos_gate.gate_engine state_transition '{"from_state":"S4","to_state":"S5","session_id":"s1"}' --agent zcode
 ```
 
 环境变量（常用）：
 
 | 变量 | 默认值 | 作用 |
 |------|--------|------|
-| `NEXUS_GATES_DIR` | （无，必需时显式指定） | 场景 YAML 目录（examples/gates 可作模板） |
+| `NEXUS_GATES_DIR` | （无，必需时显式指定） | 场景 YAML 目录（随包的 etc/checks/examples/ 可作模板） |
 | `NEXUS_VAULT_ROOT` | env > 包位置哨兵推导 > 空串 | Vault 根目录（vault 类检查插件用，干净环境可缺省） |
+| `NEXUS_AGENT` | （无 → 兜底 `cli`） | CLI 落流身份（写成真实 Agent 名才写进事件流/参与 GATE_GRACE 配对）；优先级 显式 env > `--agent` > `cli`（2611172047 B6） |
 
 ## 通用示例场景（examples/）
 
-包内不绑定任何具体业务流程——`examples/gates/` 提供 3 个通用示例（`minimal` / `pre_commit` / `doc_release`），用 `NEXUS_GATES_DIR` 指向即可运行。写你自己的门禁 = 在任意目录加一个场景 YAML（场景名 + required_context + 检查项），可选地往 `_checks/` 放检查插件（引擎自动发现），无需改引擎代码：
+包内不绑定任何具体业务流程——随包的 `etc/checks/examples/` 提供 4 个通用示例（`config_key_refs` / `doc_consistency` / `e2e-paths` / `persist_pool_ledger`），用 `NEXUS_GATES_DIR` 指向安装目录下的该路径即可运行。写你自己的门禁 = 在任意目录加一个场景 YAML（场景名 + required_context + 检查项），可选地往 `_checks/` 放检查插件（引擎自动发现），无需改引擎代码：
 
 ```bash
-export NEXUS_GATES_DIR=/path/to/your/gates   # 场景目录（examples/gates 可作模板）
+export NEXUS_GATES_DIR=/path/to/your/gates   # 场景目录（随包的 etc/checks/examples/ 可作模板）
 gate_check(scenario="your_scenario", context={...})
 ```
 
@@ -82,3 +95,7 @@ nexusos-gate 是三件套中**最独立**的一个：只依赖 pyyaml，可单�
 ## License
 
 MIT License。详见仓库根目录 [LICENSE](./LICENSE)。
+
+## 2026-11-19 变更（2611190910 / task 2611191111）
+
+- **CLI 身份链第四档**：`显式 NEXUS_AGENT > --agent > context.agent（新增）> cli 兜底`——裸调（无 env/flag）时若 context JSON 带 agent 字段则以其落流，gate 事件不再因 'cli' 未注册而丢失。仅在兜底档生效，不改变既有三态优先级。

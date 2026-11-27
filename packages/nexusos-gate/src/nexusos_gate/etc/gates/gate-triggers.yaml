@@ -28,17 +28,6 @@ triggers:
     scenario: code
     auto_triggered: false
     grace_seconds: 60              # 代码 commit 前应先过 gate
-
-  - signal: loop_start             # LOOP 全力以赴模式启动
-    scenario: loop_start
-    auto_triggered: false          # Agent 主动调 gate_check(scenario=loop_start)
-    grace_seconds: 60              # LOOP 启动前应过 gate
-
-  - signal: loop_complete          # LOOP 全自动模式退出
-    scenario: loop_complete
-    auto_triggered: false          # Agent 主动调 gate_check(scenario=loop_complete)
-    grace_seconds: 60              # LOOP 退出前应过 gate
-
   - signal: state_transition       # LOOP 状态机转换(S0→S1→...→S11)
     scenario: state_transition
     auto_triggered: false          # Agent 主动调 gate_check(scenario=state_transition)

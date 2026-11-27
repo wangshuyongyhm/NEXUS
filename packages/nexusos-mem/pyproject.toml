@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexusos-mem"
-version = "1.0.0"
+version = "1.2.0"
 description = "NEXUS-MEM — 知识库+检索+打分体系（SharedKnowledge / pgvector / BGE 可选）"
 readme = "README.md"
 requires-python = ">=3.10"

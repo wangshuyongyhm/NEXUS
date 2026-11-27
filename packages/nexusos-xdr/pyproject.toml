@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexusos-xdr"
-version = "1.0.0"
+version = "1.2.0"
 description = "NEXUS-XDR — Agent 调度总线（dispatch/callback/presence/patrol + MCP :19998）"
 readme = "README.md"
 requires-python = ">=3.10"

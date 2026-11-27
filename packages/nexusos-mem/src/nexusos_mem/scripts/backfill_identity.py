@@ -6,8 +6,8 @@
       身份=存在，活跃口径对账看 identity_coverage 视图）。
 源②a：06-Memory/MEM镜像/*.md → mirror_shard 身份行（每片一行；片内条目锚
       仅用于覆盖率报告，身份层零关系列）。
-源②b：06-Memory/MEM图谱/MEM-<id>.md → graph_card 身份行（frontmatter 裸
-      mem_id 是锚；悬空卡——knowledge 无此 id——跳过并计数，不造 FK 违例）。
+源②b（已退役，2026-11-24 任务 2611230854）：图谱卡目录已移出，本段停用，
+      恒为 0 行；list_graph_cards() 与 main() 里的原逻辑均以注释保留。
 
 重复执行安全：全部 ON CONFLICT DO NOTHING，重跑只补新增。
 用法：python3 backfill_identity.py [--vault-root PATH]
@@ -29,6 +29,16 @@ GRAPH_DIR = "06-Memory/MEM图谱"
 _HEADING_ID_RE = re.compile(r"^## \[#(\d+)\]", re.M)
 _FM_MEMIDS_RE = re.compile(r"^mem_ids: \[([\d,\s]*)\]", re.M)
 _FM_MEMID_RE = re.compile(r"^mem_id: (\d+)", re.M)
+
+
+def list_graph_cards(vault_root) -> list:
+    """列出图谱卡文件（只读、不连库）。
+
+    图谱卡已于 2026-11-24 退役（任务 2611230854，目录已移出）：目录不存在时返回
+    空列表，所以停用后调用方拿到的恒为 []。保留这个函数是为了可复用与可测试。
+    """
+    d = Path(vault_root) / GRAPH_DIR
+    return sorted(d.glob("MEM-*.md")) if d.is_dir() else []
 
 
 def _kind_count(cur, kind):
@@ -78,29 +88,37 @@ def main():
             "no_anchor": len(shard_files) - fm_anchor - heading_anchor,
         }
 
-        # 源②b：图谱卡扫描（frontmatter mem_id；悬空 FK 跳过计数）
-        cur.execute("SELECT id FROM knowledge")
-        valid_ids = {r[0] for r in cur.fetchall()}
-        card_files = sorted((vault / GRAPH_DIR).glob("MEM-*.md")) \
-            if (vault / GRAPH_DIR).is_dir() else []
+        # 2611230858：源②b 图谱卡已退役（2611230854 目录移出）——整段停用，恒为 0 行。
+        # 原逻辑注释保留以便追溯（下方再给一个零值报告，键名与原报告一致）：
+#         # 源②b：图谱卡扫描（frontmatter mem_id；悬空 FK 跳过计数）
+#         cur.execute("SELECT id FROM knowledge")
+#         valid_ids = {r[0] for r in cur.fetchall()}
+#         card_files = sorted((vault / GRAPH_DIR).glob("MEM-*.md")) \
+#             if (vault / GRAPH_DIR).is_dir() else []
+#         card_rows = []
+#         dangling = no_anchor = 0
+#         for f in card_files:
+#             text = f.read_text(encoding="utf-8", errors="replace")[:2000]
+#             m = _FM_MEMID_RE.search(text)
+#             if not m:
+#                 no_anchor += 1
+#                 continue
+#             mid = int(m.group(1))
+#             if mid not in valid_ids:
+#                 dangling += 1
+#                 continue
+#             card_rows.append(("graph_card", mid, f"{GRAPH_DIR}/{f.name}", "backfill:1524"))
+#         report["graph_card"] = {
+#             "files": len(card_files),
+#             "with_mem_id": len(card_rows) + dangling,
+#             "dangling_fk_skipped": dangling,
+#             "no_mem_id": no_anchor,
+#         }
+        card_files = []          # 退役：不再扫目录（list_graph_cards 保留给测试/复用）
         card_rows = []
-        dangling = no_anchor = 0
-        for f in card_files:
-            text = f.read_text(encoding="utf-8", errors="replace")[:2000]
-            m = _FM_MEMID_RE.search(text)
-            if not m:
-                no_anchor += 1
-                continue
-            mid = int(m.group(1))
-            if mid not in valid_ids:
-                dangling += 1
-                continue
-            card_rows.append(("graph_card", mid, f"{GRAPH_DIR}/{f.name}", "backfill:1524"))
         report["graph_card"] = {
-            "files": len(card_files),
-            "with_mem_id": len(card_rows) + dangling,
-            "dangling_fk_skipped": dangling,
-            "no_mem_id": no_anchor,
+            "files": 0, "with_mem_id": 0, "dangling_fk_skipped": 0, "no_mem_id": 0,
+            "retired": "2611230854",
         }
         conn.close()
 

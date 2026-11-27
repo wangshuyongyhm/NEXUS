@@ -30,6 +30,7 @@ import platform
 import socket
 from pathlib import Path
 import threading
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -45,6 +46,24 @@ _EMBED_TIMEOUT = 5  # 秒，超时降级 difflib
 _EMBED_CACHE: Dict[str, List[float]] = {}  # text → vector 缓存（同串不重复 embed）
 _EMBED_CACHE_LOCK = threading.Lock()
 _EMBED_AVAILABLE: Optional[bool] = None  # None=未探测, True/False=已知状态
+# Task 2611269951：原实现一旦置 False 就永不恢复（只有测试的 _reset_embed_state 能清）。
+# 改成「冷却后允许重探」：服务重启回来了，这边不需要跟着重启进程。
+_EMBED_DOWN_COOLDOWN_SEC = float(os.environ.get("NEXUS_EMBED_DOWN_COOLDOWN", "60"))
+_EMBED_DOWN_UNTIL = 0.0  # 已知不可用的冷却截止（time.time() 口径；0=未置位）
+
+
+def _embed_service_usable() -> bool:
+    """已知不可用是否还在冷却期内；冷却过了就放行下一次真实探测。"""
+    if _EMBED_AVAILABLE is False and time.time() < _EMBED_DOWN_UNTIL:
+        return False
+    return True
+
+
+def _mark_embed_down() -> None:
+    """置位「不可用」并开始冷却；冷却结束后的首次调用会重新探测。"""
+    global _EMBED_AVAILABLE, _EMBED_DOWN_UNTIL
+    _EMBED_AVAILABLE = False
+    _EMBED_DOWN_UNTIL = time.time() + _EMBED_DOWN_COOLDOWN_SEC
 
 
 def _embed_text_via_service(text: str) -> Optional[List[float]]:
@@ -60,8 +79,9 @@ def _embed_text_via_service(text: str) -> Optional[List[float]]:
     with _EMBED_CACHE_LOCK:
         if text in _EMBED_CACHE:
             return _EMBED_CACHE[text]
-    # 已知服务 DOWN → 不重试（避免每次套用都超时）
-    if _EMBED_AVAILABLE is False:
+    # 已知服务 DOWN → 不重试（避免每次套用都超时；冷却过后放行一次重探）
+    # if _EMBED_AVAILABLE is False:
+    if not _embed_service_usable():
         return None
     try:
         payload = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
@@ -87,7 +107,8 @@ def _embed_text_via_service(text: str) -> Optional[List[float]]:
             import sys
             print(f"[WARN] EMBED 服务不可用（{type(e).__name__}: {e}），降级 difflib",
                   file=sys.stderr)
-        _EMBED_AVAILABLE = False
+        # _EMBED_AVAILABLE = False
+        _mark_embed_down()
         return None
 
 
@@ -106,7 +127,8 @@ def _embed_pair_via_service(a: str, b: str) -> tuple:
         vb = _EMBED_CACHE.get(b)
     if va is not None and vb is not None:
         return va, vb
-    if _EMBED_AVAILABLE is False or not a or not b:
+    # if _EMBED_AVAILABLE is False or not a or not b:
+    if not _embed_service_usable() or not a or not b:
         # 服务已知 DOWN：仍给缓存半命中机会（上面已查），这里直接回传
         return va, vb
     try:
@@ -131,7 +153,8 @@ def _embed_pair_via_service(a: str, b: str) -> tuple:
             import sys
             print(f"[WARN] EMBED 服务不可用（{type(e).__name__}: {e}），降级 difflib",
                   file=sys.stderr)
-        _EMBED_AVAILABLE = False
+        # _EMBED_AVAILABLE = False
+        _mark_embed_down()
         return va, vb
 
 
@@ -150,10 +173,11 @@ def _cosine_similarity(va: List[float], vb: List[float]) -> float:
 
 def _reset_embed_state() -> None:
     """重置 embedding 缓存 + 可用性状态（测试用）。"""
-    global _EMBED_AVAILABLE
+    global _EMBED_AVAILABLE, _EMBED_DOWN_UNTIL
     with _EMBED_CACHE_LOCK:
         _EMBED_CACHE.clear()
     _EMBED_AVAILABLE = None
+    _EMBED_DOWN_UNTIL = 0.0
 
 
 # ---------------------------------------------------------------------------
