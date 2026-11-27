@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nexusos-mem"
 version = "1.2.0"
-description = "NEXUS-MEM — 知识库+检索+打分体系（SharedKnowledge / pgvector / BGE 可选）"
+description = "nexusos-mem — NEXUS shared knowledge base: hybrid FTS + optional vector retrieval and scoring over PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 621 旧式 text 表（非 SPDX 表达式）——保留 License classifier 不被新版
@@ -13,7 +13,17 @@ requires-python = ">=3.10"
 # 干净 venv 安装失败（1609 实测 InvalidConfigError）。
 license = {text = "MIT"}
 authors = [{name = "NEXUS Contributors"}]
-classifiers = ["License :: OSI Approved :: MIT License"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 # 池#72 依赖分层：核心件零重依赖。deps 为 Task631 逐文件实测顶部 import 结论
 # （任务书⚠️教训：勿信调研）——psycopg2 顶层 3 件（shared/search/embed_corpus）；
 # pyyaml 虽全懒但 /search 与 embed 服务路径必经（term_dict/config 加载）→ 核心。

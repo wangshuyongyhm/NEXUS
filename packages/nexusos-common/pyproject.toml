@@ -5,13 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nexusos-common"
 version = "1.0.0"
-description = "nexusos-common — NEXUS 四包共享锚点解析（NEXUS_HOME / vault_root / task_root / subpath / expand_env + 私路径 lint）"
+description = "nexusos-common — shared anchor resolution for the NEXUS packages (NEXUS_HOME / vault_root / task_root / subpath / expand_env) plus a private-path lint scanner"
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 621 旧式 text 表（同 nexusos-mem：防 setuptools>=77 PEP639 拒绝）
 license = {text = "MIT"}
 authors = [{name = "NEXUS Contributors"}]
-classifiers = ["License :: OSI Approved :: MIT License"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 # 零三方依赖红线（1955 design §3.2）
 dependencies = []
 
@@ -20,7 +30,7 @@ dependencies = []
 nexus = "nexusos_common.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/wangshuyongyhm/nexusos-common"
+Homepage = "https://github.com/wangshuyongyhm/NEXUS"
 
 [tool.setuptools.packages.find]
 where = ["src"]
